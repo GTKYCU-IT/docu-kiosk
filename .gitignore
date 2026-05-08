@@ -18,17 +18,13 @@ dist.pem
 
 # build artifacts
 dist.crx
-public/docu-kiosk.crx
+extension/public/docu-kiosk.crx
 
 # broker
 broker/broker
 broker/server.crt
 broker/server.key
 broker/frontend/
-
-# kiosk
-kiosk/node_modules
-kiosk/dist
 
 # Editor directories and files
 .vscode/*
