@@ -3,6 +3,6 @@
   <app appid='ndmpfjhihnpgakamhhdcpjemakdgmkcp'>
     <updatecheck
       codebase='http://192.168.168.77:8000/docu-kiosk.crx'
-      version='1.0.0' />
+      version='1.0.4' />
   </app>
 </gupdate>

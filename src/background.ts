@@ -1,96 +1,56 @@
-import { getConfig } from "./config";
+import { getConfig } from './config'
+import type { Config } from './config'
 
-// function extractCode(url: string): string | null {
-//   try {
-//     const parsed = new URL(url);
-//     return parsed.searchParams.get("code");
-//   } catch {
-//     return null;
-//   }
-// }
-//
-// function isDocuSignStart(url: string): boolean {
-//   return url.includes("/Signing/StartInSession.aspx")
-//     && url.includes("code=")
-// }
-//
-// function sendToBroker(payload: {
-//   kioskId: string;
-//   docusignCode: string;
-//   sourceUrl: string;
-// }) {
-//   console.log("PAYLOAD:", payload)
-//   // try {
-//   //   await fetch(CONFIG.BROKER_URL, {
-//   //     method: "POST",
-//   //     headers: {
-//   //       "Content-Type": "application/json"
-//   //     },
-//   //     body: JSON.stringify(payload)
-//   //   });
-//   // } catch (err) {
-//   //   console.error("Broker call failed:", err);
-//   // }
-// }
+let config: Config = { kioskId: 'unknown-kiosk', brokerUrl: '', kioskUrl: '' }
+getConfig().then(c => { config = c })
 
 function captureSigningUrl(details: chrome.webRequest.OnBeforeRequestDetails): string {
-  let url = details.url;
+  let url = details.url
 
-  if (details.method === "POST" && details.requestBody?.formData) {
+  if (details.method === 'POST' && details.requestBody?.formData) {
     try {
-      const formData = details.requestBody.formData;
-      const params = new URLSearchParams();
-
-      for (const [key, values] of Object.entries(formData)) {
-        if (values && values.length > 0) {
-          params.append(key, values[0].toString());
-        }
+      const params = new URLSearchParams()
+      for (const [key, values] of Object.entries(details.requestBody.formData)) {
+        if (values && values.length > 0) params.append(key, values[0].toString())
       }
-
-      url = `${url}?${params.toString()}`;
+      url = `${url}?${params.toString()}`
     } catch (e) {
-      console.error("Could not parse request body", e)
+      console.error('Could not parse request body', e)
     }
   }
 
-  return url;
+  return url
 }
 
-console.log("DocuSign interceptor loaded");
+function injectReturnUrl(signingUrl: string, kioskId: string, kioskUrl: string): string {
+  try {
+    const url = new URL(signingUrl)
+    url.searchParams.set('returnUrl', `${kioskUrl}?id=${kioskId}`)
+    return url.toString()
+  } catch {
+    return signingUrl
+  }
+}
+
+console.log('DocuSign interceptor loaded')
 chrome.webRequest.onBeforeRequest.addListener((details) => {
-  // const { url, method, requestBody } = details;
-  const config = getConfig();
+  const raw = captureSigningUrl(details)
+  const url = config.kioskUrl ? injectReturnUrl(raw, config.kioskId, config.kioskUrl) : raw
 
-  console.log("Kiosk ID:", config.kioskId);
-  console.log("Broker URL", config.brokerUrl);
+  console.log('Intercepted signing URL:', url)
 
-
-  // if (!url || !isDocuSignStart(url)) {
-  //   return undefined;
-  // }
-
-  // const code = extractCode(url);
-  // console.log("Extracted code:", code)
-  //
-  // if (!code) {
-  //   return undefined;
-  // }
-
-  // sendToBroker({
-  //   kioskId: config.kioskId,
-  //   docusignCode: code,
-  //   sourceUrl: url
-  // });
-
-
-  const signingUrl = captureSigningUrl(details);
-  console.log("Signing URL:", signingUrl);
+  if (config.brokerUrl) {
+    fetch(config.brokerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kioskId: config.kioskId, url })
+    }).catch(err => console.error('Broker call failed:', err))
+  }
 
   return { cancel: true }
 }, {
   urls: [
-    "*://*.docusign.net/*",
-    "*://*.docusign.com/*",
+    '*://*.docusign.net/*',
+    '*://*.docusign.com/*',
   ]
-},
-  ["requestBody"]);
+}, ['requestBody', 'blocking'])
