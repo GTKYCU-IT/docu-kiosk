@@ -1,39 +1,34 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import Register from '$lib/components/Register.svelte'
 
-  const KIOSK_ID = new URLSearchParams(location.search).get('id') ?? 'unknown'
-  const WS_URL = `ws://${location.hostname}:8080/kiosk/${KIOSK_ID}/ws`
+  const kioskId = localStorage.getItem('kioskId')
+  const kioskToken = localStorage.getItem('kioskToken')
+  const registered = !!(kioskId && kioskToken)
 
-  let signing = false
+  let signing = $state(false)
 
   onMount(() => {
-    const ws = new WebSocket(WS_URL)
+    if (!registered) return
+
+    const ws = new WebSocket(`ws://${location.hostname}:8080/ws`)
 
     ws.onmessage = ({ data }) => {
       const msg = JSON.parse(data)
       if (msg.type === 'sign') {
         signing = true
-        // TODO: load signing URL
+        // TODO: load signing URL into iframe
       }
     }
   })
 </script>
 
-{#if signing}
+{#if !registered}
+  <Register />
+{:else if signing}
   <!-- signing view goes here -->
 {:else}
-  <div class="waiting">Ready for member</div>
+  <div class="flex min-h-svh items-center justify-center bg-muted">
+    <p class="text-2xl font-medium text-muted-foreground">Ready for member</p>
+  </div>
 {/if}
-
-<style>
-  .waiting {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    height: 100vh;
-    font-size: 2rem;
-    font-family: sans-serif;
-    color: #333;
-    background: #f5f5f5;
-  }
-</style>
