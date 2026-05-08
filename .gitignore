@@ -22,6 +22,9 @@ public/docu-kiosk.crx
 
 # broker
 broker/broker
+broker/server.crt
+broker/server.key
+broker/frontend/
 
 # kiosk
 kiosk/node_modules
