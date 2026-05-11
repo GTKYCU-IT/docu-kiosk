@@ -1,23 +1,23 @@
 package main
 
 import (
-	"context"
+	"docu-kiosk/broker/internal/server"
+	"docu-kiosk/broker/internal/store"
 	"log"
-	"net/http"
 )
 
 func main() {
-	setupAPI()
+	store, err := store.NewInMemoryClientStore()
+	if err != nil {
+		log.Fatalf("error creating client store: %s", err)
+	}
 
-	log.Fatal(http.ListenAndServeTLS(":8080", "server.crt", "server.key", nil))
-}
+	server, err := server.NewServer(store, 8080)
+	if err != nil {
+		log.Fatalf("error creating server: %s", err)
+	}
 
-func setupAPI() {
-	ctx := context.Background()
-
-	manager := NewManager(ctx)
-
-	http.Handle("/", http.FileServer(http.Dir("./frontend")))
-	http.HandleFunc("/ws", manager.serveWS)
-	http.HandleFunc("/login", manager.loginHandler)
+	if err := server.Start(); err != nil {
+		log.Fatalf("error stopping server: %s", err)
+	}
 }
