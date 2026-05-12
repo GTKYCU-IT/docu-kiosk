@@ -33,6 +33,7 @@ func NewServer(port int, tokenSecret, registrationKey string) (server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/kiosks", s.handleRegister)
 	mux.HandleFunc("GET /api/kiosks", s.handleListKiosks)
+	mux.HandleFunc("POST /api/kiosks/{id}/sessions", s.handlePush)
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.Handle("/", http.FileServer(http.Dir("./web/dist")))
 

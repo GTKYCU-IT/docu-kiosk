@@ -26,21 +26,32 @@ A Manifest V3 Chrome/Edge extension installed on MSR workstations. Intercepts re
 
 ## Development
 
-**Prerequisites:** Go 1.25+, Node 22+
+**Prerequisites:** Go 1.25+, Node 22+, [air](https://github.com/air-verse/air) (`go install github.com/air-verse/air@latest`)
 
 ```bash
-# Terminal 1 — broker
-DOCU_KIOSK_TOKEN_SECRET=dev DOCU_KIOSK_REGISTRATION_KEY=dev go run ./cmd/server
+# Start broker (hot-reload) + frontend (hot-reload) together
+make dev
 
-# Terminal 2 — frontend (hot reload via Vite proxy → broker)
-cd web && npm install && npm run dev
-
-# Extension
-cd extension && npm install && npm run build
-# Load extension/dist/ as an unpacked extension at edge://extensions
+# Or run each separately
+make dev-broker   # broker with air
+make dev-web      # Vite dev server
 ```
 
 The Vite dev server proxies `/api` and `/ws` to the broker at `localhost:8080`, so the frontend and broker can be developed together without a production build.
+
+```bash
+# Build everything (frontend + broker binary + extension)
+make build
+
+# Build individual components
+make web        # Vite production build → web/dist/
+make server     # Go binary → ./server
+make extension  # Extension → extension/dist/
+
+make clean      # Remove build artifacts
+```
+
+Load `extension/dist/` as an unpacked extension at `edge://extensions` → "Load unpacked" to manually test the extension.
 
 ## Deployment
 
@@ -74,7 +85,12 @@ docker compose up -d
 
 **5. Export the root certificate** for distribution to client devices:
 ```bash
-docker compose exec caddy cat /data/pki/authorities/local/root.crt > docu-kiosk-ca.crt
+make cert-export
+```
+
+This writes `docu-kiosk-ca.crt` to the current directory. To use a different filename:
+```bash
+make cert-export CERT_FILE=my-ca.crt
 ```
 
 **6. Distribute the root certificate**
@@ -85,8 +101,8 @@ docker compose exec caddy cat /data/pki/authorities/local/root.crt > docu-kiosk-
 
 ```bash
 git pull
-docker compose build
-docker compose up -d
+make docker-build
+make docker-up
 ```
 
 ## Configuration
@@ -105,7 +121,7 @@ Configure via the extension's options page (`edge://extensions` → DocuSign Kio
 
 | Option | Description |
 |---|---|
-| Broker URL | Full URL of the push endpoint, e.g. `https://broker.yourdomain.local/api/push` |
+| Broker URL | Base URL of the broker, e.g. `https://broker.yourdomain.local` |
 | Kiosk ID | ID of the kiosk to push signing URLs to (from `GET /api/kiosks`) |
 
 The extension also supports enterprise MDM/GPO deployment via managed storage (`chrome.storage.managed`), which pre-configures options across all workstations without manual setup.
@@ -123,4 +139,5 @@ The extension also supports enterprise MDM/GPO deployment via managed storage (`
 |---|---|---|
 | `POST` | `/api/kiosks` | Register a kiosk — returns an auth token |
 | `GET` | `/api/kiosks` | List currently connected kiosks |
+| `POST` | `/api/kiosks/{id}/sessions` | Push a signing URL to a connected kiosk |
 | `GET` | `/ws?token=<token>` | Establish a kiosk WebSocket connection |

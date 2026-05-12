@@ -31,6 +31,7 @@ func setupTestServer(t *testing.T) (*server, *httptest.Server) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/kiosks", s.handleRegister)
 	mux.HandleFunc("GET /api/kiosks", s.handleListKiosks)
+	mux.HandleFunc("POST /api/kiosks/{id}/sessions", s.handlePush)
 	mux.HandleFunc("/ws", s.handleWS)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
@@ -298,6 +299,135 @@ func TestWSReconnectCreatesFreshSession(t *testing.T) {
 	}
 	if connected[0].ID == id1 {
 		t.Error("expected a new session ID after reconnect")
+	}
+}
+
+// --- Push ---
+
+func TestPushSuccess(t *testing.T) {
+	_, ts := setupTestServer(t)
+	conn, _ := connectWS(t, ts, testToken(t, "lobby"))
+
+	id := ""
+	res, err := http.Get(ts.URL + "/api/kiosks")
+	if err != nil {
+		t.Fatalf("list kiosks: %v", err)
+	}
+	var kiosks []struct {
+		ID string `json:"id"`
+	}
+	json.NewDecoder(res.Body).Decode(&kiosks)
+	res.Body.Close()
+	id = kiosks[0].ID
+
+	res, err = http.Post(ts.URL+"/api/kiosks/"+id+"/sessions", "application/json",
+		strings.NewReader(`{"url":"https://example.docusign.net/sign/abc123"}`))
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", res.StatusCode)
+	}
+
+	_, data, err := conn.Read(context.Background())
+	if err != nil {
+		t.Fatalf("read ws message: %v", err)
+	}
+	var msg struct {
+		Type string `json:"type"`
+		URL  string `json:"url"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if msg.Type != "sign" {
+		t.Errorf("expected type sign, got %q", msg.Type)
+	}
+	if msg.URL != "https://example.docusign.net/sign/abc123" {
+		t.Errorf("unexpected url: %s", msg.URL)
+	}
+}
+
+func TestPushKioskNotFound(t *testing.T) {
+	_, ts := setupTestServer(t)
+
+	res, err := http.Post(ts.URL+"/api/kiosks/00000000-0000-0000-0000-000000000000/sessions",
+		"application/json", strings.NewReader(`{"url":"https://example.docusign.net/sign/abc"}`))
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", res.StatusCode)
+	}
+}
+
+func TestPushInvalidUUID(t *testing.T) {
+	_, ts := setupTestServer(t)
+
+	res, err := http.Post(ts.URL+"/api/kiosks/not-a-uuid/sessions",
+		"application/json", strings.NewReader(`{"url":"https://example.docusign.net/sign/abc"}`))
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", res.StatusCode)
+	}
+}
+
+func TestPushMissingURL(t *testing.T) {
+	_, ts := setupTestServer(t)
+	connectWS(t, ts, testToken(t, "lobby"))
+
+	id := ""
+	res, err := http.Get(ts.URL + "/api/kiosks")
+	if err != nil {
+		t.Fatalf("list kiosks: %v", err)
+	}
+	var kiosks []struct {
+		ID string `json:"id"`
+	}
+	json.NewDecoder(res.Body).Decode(&kiosks)
+	res.Body.Close()
+	id = kiosks[0].ID
+
+	res, err = http.Post(ts.URL+"/api/kiosks/"+id+"/sessions",
+		"application/json", strings.NewReader(`{"url":""}`))
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", res.StatusCode)
+	}
+}
+
+func TestPushBadJSON(t *testing.T) {
+	_, ts := setupTestServer(t)
+	connectWS(t, ts, testToken(t, "lobby"))
+
+	id := ""
+	res, err := http.Get(ts.URL + "/api/kiosks")
+	if err != nil {
+		t.Fatalf("list kiosks: %v", err)
+	}
+	var kiosks []struct {
+		ID string `json:"id"`
+	}
+	json.NewDecoder(res.Body).Decode(&kiosks)
+	res.Body.Close()
+	id = kiosks[0].ID
+
+	res, err = http.Post(ts.URL+"/api/kiosks/"+id+"/sessions",
+		"application/json", strings.NewReader("not json"))
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", res.StatusCode)
 	}
 }
 
