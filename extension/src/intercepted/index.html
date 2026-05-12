@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Document Intercepted</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        background: #f5f5f5;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+      }
+      .card {
+        background: #fff;
+        border-radius: 10px;
+        box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+        padding: 40px 48px;
+        max-width: 440px;
+        width: 100%;
+        text-align: center;
+      }
+      .icon {
+        font-size: 2.5rem;
+        margin-bottom: 16px;
+      }
+      h1 {
+        font-size: 1.25rem;
+        font-weight: 600;
+        margin-bottom: 10px;
+        color: #111;
+      }
+      p {
+        font-size: 0.9rem;
+        color: #555;
+        line-height: 1.55;
+      }
+      .hint {
+        margin-top: 20px;
+        font-size: 0.8rem;
+        color: #888;
+      }
+      .open-local {
+        margin-top: 24px;
+        background: none;
+        border: none;
+        color: #666;
+        font-size: 0.8rem;
+        cursor: pointer;
+        text-decoration: underline;
+        padding: 0;
+      }
+      .open-local:hover { color: #333; }
+      .open-local:disabled { color: #aaa; cursor: default; text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="icon">📋</div>
+      <h1>Document ready to send</h1>
+      <p>The signing link has been intercepted. Use the <strong>Send to Kiosk</strong> popup to choose which kiosk should receive this document.</p>
+      <p class="hint">You can close this tab after selecting a kiosk.</p>
+      <button class="open-local" id="open-local">Open signing link on this computer instead</button>
+    </div>
+    <script>
+      const btn = document.getElementById('open-local')
+      btn.addEventListener('click', async () => {
+        btn.disabled = true
+        btn.textContent = 'Opening…'
+        const { pendingSigningUrl } = await chrome.storage.session.get('pendingSigningUrl')
+        if (!pendingSigningUrl) {
+          btn.textContent = 'No signing link found.'
+          return
+        }
+        await chrome.storage.session.remove('pendingSigningUrl')
+        await chrome.runtime.sendMessage({ type: 'openLocally', url: pendingSigningUrl })
+        window.location.href = pendingSigningUrl
+      })
+    </script>
+  </body>
+</html>

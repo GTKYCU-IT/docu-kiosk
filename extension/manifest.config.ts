@@ -33,5 +33,12 @@ export default defineManifest({
     "service_worker": "src/background.ts"
   },
 
-  options_page: 'src/options/index.html'
+  options_page: 'src/options/index.html',
+
+  web_accessible_resources: [
+    {
+      resources: ['src/intercepted/index.html'],
+      matches: ['https://*.docusign.net/*', 'https://*.docusign.com/*'],
+    },
+  ],
 })

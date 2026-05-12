@@ -1,8 +1,23 @@
 import { getConfig } from './config'
 
-getConfig().then(config => {
+const bypassUrls = new Set<string>()
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === 'openLocally' && typeof msg.url === 'string') {
+    bypassUrls.add(msg.url)
+    sendResponse({ ok: true })
+  }
+  return true
+})
+
+getConfig().then(() => {
   chrome.webRequest.onBeforeRequest.addListener((details) => {
     const url = captureSigningUrl(details)
+
+    if (bypassUrls.has(url)) {
+      bypassUrls.delete(url)
+      return {}
+    }
 
     chrome.storage.session.set({ pendingSigningUrl: url }).then(() => {
       chrome.windows.create({
@@ -14,11 +29,7 @@ getConfig().then(config => {
       })
     })
 
-    if (config.kioskUrl) {
-      console.log('Intercepted signing URL:', url)
-    }
-
-    return { cancel: true }
+    return { redirectUrl: chrome.runtime.getURL('src/intercepted/index.html') }
   }, {
     urls: [
       '*://*.docusign.net/*',
