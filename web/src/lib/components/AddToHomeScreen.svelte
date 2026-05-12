@@ -5,7 +5,7 @@
   let { token, onDone }: { name: string; token: string; onDone: () => void } =
     $props();
 
-  const shortcutUrl = `${location.origin}/?token=${token}`;
+  const shortcutUrl = $derived(`${location.origin}/?token=${token}`);
 </script>
 
 <div class="flex min-h-svh items-center justify-center bg-muted p-4">
