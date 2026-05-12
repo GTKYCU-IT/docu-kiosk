@@ -128,8 +128,8 @@ The extension also supports enterprise MDM/GPO deployment via managed storage (`
 
 ## Kiosk registration
 
-1. Open `https://broker.yourdomain.local` on the kiosk device
-2. Enter a name (e.g. `Lobby Kiosk 1`) and the registration key
+1. On the kiosk device, browse to `https://broker.yourdomain.local/trust` — accept the certificate warning, download and install the CA cert, then enable full trust
+2. Browse to `https://broker.yourdomain.local`, enter a name (e.g. `Lobby Kiosk 1`) and the registration key
 3. When prompted, save the page as a home screen shortcut
 4. The shortcut URL contains the kiosk's authentication token — opening it automatically connects the kiosk to the broker
 
@@ -137,6 +137,7 @@ The extension also supports enterprise MDM/GPO deployment via managed storage (`
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/trust` | Download the Caddy root CA certificate |
 | `POST` | `/api/kiosks` | Register a kiosk — returns an auth token |
 | `GET` | `/api/kiosks` | List currently connected kiosks |
 | `POST` | `/api/kiosks/{id}/sessions` | Push a signing URL to a connected kiosk |
