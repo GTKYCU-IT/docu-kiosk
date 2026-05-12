@@ -23,49 +23,72 @@ async function main() {
     return
   }
 
-  let kiosks: Kiosk[]
-  try {
-    const res = await fetch(`${config.brokerUrl}/api/kiosks`)
-    kiosks = await res.json()
-  } catch {
-    statusEl.textContent = 'Could not reach broker. Check that it is running.'
-    return
-  }
+  let sending = false
 
-  if (kiosks.length === 0) {
-    statusEl.textContent = 'No kiosks are connected.'
-    return
-  }
+  async function refreshKiosks() {
+    if (sending) return
 
-  statusEl.textContent = 'Select a kiosk:'
+    let kiosks: Kiosk[]
+    try {
+      const res = await fetch(`${config.brokerUrl}/api/kiosks`)
+      kiosks = await res.json()
+    } catch {
+      statusEl.textContent = 'Could not reach broker. Check that it is running.'
+      return
+    }
 
-  for (const kiosk of kiosks) {
-    const btn = document.createElement('button')
-    btn.textContent = kiosk.name
-    btn.addEventListener('click', async () => {
-      btn.disabled = true
-      statusEl.textContent = `Sending to ${kiosk.name}…`
+    if (sending) return
 
-      try {
-        const res = await fetch(`${config.brokerUrl}/api/kiosks/${kiosk.id}/sessions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: pendingUrl }),
-        })
+    const prevIds = new Set(
+      Array.from(listEl.querySelectorAll<HTMLButtonElement>('button')).map(b => b.dataset.id)
+    )
+    const unchanged = kiosks.length === prevIds.size && kiosks.every(k => prevIds.has(k.id))
+    if (unchanged) return
 
-        if (!res.ok) {
-          throw new Error(`${res.status}`)
+    listEl.innerHTML = ''
+
+    if (kiosks.length === 0) {
+      statusEl.textContent = 'No kiosks are connected. Waiting…'
+      return
+    }
+
+    statusEl.textContent = 'Select a kiosk:'
+
+    for (const kiosk of kiosks) {
+      const btn = document.createElement('button')
+      btn.textContent = kiosk.name
+      btn.dataset.id = kiosk.id
+      btn.addEventListener('click', async () => {
+        sending = true
+        clearInterval(pollInterval)
+        listEl.querySelectorAll('button').forEach(b => ((b as HTMLButtonElement).disabled = true))
+        statusEl.textContent = `Sending to ${kiosk.name}…`
+
+        try {
+          const res = await fetch(`${config.brokerUrl}/api/kiosks/${kiosk.id}/sessions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: pendingUrl }),
+          })
+
+          if (!res.ok) throw new Error(`${res.status}`)
+
+          await chrome.storage.session.remove('pendingSigningUrl')
+          window.close()
+        } catch {
+          statusEl.textContent = `Failed to send to ${kiosk.name}.`
+          sending = false
+          listEl.querySelectorAll('button').forEach(b => ((b as HTMLButtonElement).disabled = false))
+          pollInterval = setInterval(refreshKiosks, 3000)
         }
+      })
+      listEl.appendChild(btn)
+    }
 
-        await chrome.storage.session.remove('pendingSigningUrl')
-        window.close()
-      } catch (e) {
-        statusEl.textContent = `Failed to send to ${kiosk.name}.`
-        btn.disabled = false
-      }
-    })
-    listEl.appendChild(btn)
   }
+
+  await refreshKiosks()
+  let pollInterval = setInterval(refreshKiosks, 3000)
 }
 
 main()
