@@ -1,4 +1,4 @@
-.PHONY: all build web server extension clean \
+.PHONY: all build web server extension pack clean \
         dev dev-web dev-broker run \
         test test-race vet \
         docker-build docker-up docker-down \
@@ -41,6 +41,10 @@ server: web ## Build broker binary → ./server
 
 extension: ## Build Chrome/Edge extension → extension/dist/
 	cd extension && npm run build
+
+pack: ## Sign and pack extension → extension/public/ (requires BROKER_HOST and dist.pem)
+	$(eval export $(shell grep '^BROKER_HOST' .env))
+	cd extension && npm run pack
 
 clean: ## Remove build artifacts
 	rm -f server

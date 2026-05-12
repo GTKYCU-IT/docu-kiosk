@@ -1,6 +1,9 @@
 web/node_modules/
 web/dist/
-extension/
+extension/node_modules/
+extension/dist/
+extension/src/
+extension/scripts/
 dist/
 release/
 tmp/

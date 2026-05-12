@@ -7,7 +7,12 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const { version } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 
 const EXTENSION_ID = 'ndmpfjhihnpgakamhhdcpjemakdgmkcp'
-const CODEBASE_URL = 'http://192.168.168.77:8000/docu-kiosk.crx'
+const brokerHost = process.env.BROKER_HOST
+if (!brokerHost) {
+  console.error('BROKER_HOST environment variable is required')
+  process.exit(1)
+}
+const CODEBASE_URL = `https://${brokerHost}/extension/docu-kiosk.crx`
 
 const edgeCandidates = [
   '/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
