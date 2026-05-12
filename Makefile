@@ -1,4 +1,4 @@
-.PHONY: all build web server extension pack clean \
+.PHONY: all build web server extension pack deploy-ext clean \
         dev dev-web dev-broker run \
         test test-race vet \
         docker-build docker-up docker-down \
@@ -42,9 +42,18 @@ server: web ## Build broker binary → ./server
 extension: ## Build Chrome/Edge extension → extension/dist/
 	cd extension && npm run build
 
-pack: ## Sign and pack extension → extension/public/ (dev machine only — requires Edge + dist.pem)
-	$(eval export $(shell grep '^BROKER_HOST' .env))
+DEPLOY_USER ?= gtky
+DEPLOY_PATH ?= ~/docu-kiosk/extension/public/
+
+pack: ## Sign, pack, and deploy extension (dev machine only — requires Edge + dist.pem; set BROKER_HOST)
+	$(eval export $(shell grep '^BROKER_HOST' .env 2>/dev/null || true))
 	cd extension && npm run pack
+	$(MAKE) deploy-ext
+
+deploy-ext: ## Copy packed extension to server (set BROKER_HOST and optionally DEPLOY_USER/DEPLOY_PATH)
+	@test -n "$(BROKER_HOST)" || (echo "Error: BROKER_HOST is not set"; exit 1)
+	scp extension/public/docu-kiosk.crx extension/public/update.xml \
+		$(DEPLOY_USER)@$(BROKER_HOST):$(DEPLOY_PATH)
 
 clean: ## Remove build artifacts
 	rm -f server
