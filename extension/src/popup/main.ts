@@ -47,19 +47,10 @@ async function main() {
       statusEl.textContent = `Sending to ${kiosk.name}…`
 
       try {
-        let urlToSend = pendingUrl
-        try {
-          const parsed = new URL(pendingUrl)
-          parsed.searchParams.set('returnUrl', `${config.brokerUrl}/signed`)
-          urlToSend = parsed.toString()
-        } catch {
-          // use raw URL if parsing fails
-        }
-
         const res = await fetch(`${config.brokerUrl}/api/kiosks/${kiosk.id}/sessions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: urlToSend }),
+          body: JSON.stringify({ url: pendingUrl }),
         })
 
         if (!res.ok) {

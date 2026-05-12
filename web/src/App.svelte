@@ -58,6 +58,12 @@
   <!-- intentionally blank while connecting -->
 {:else if view === "signing"}
   <iframe src={signingUrl} title="DocuSign" style="position:fixed;inset:0;width:100%;height:100%;border:none;"></iframe>
+  <button
+    onclick={() => { signingUrl = ""; view = "waiting"; }}
+    style="position:fixed;bottom:2rem;left:50%;translate:-50% 0;z-index:9999;padding:0.75rem 2rem;background:rgba(0,0,0,0.7);color:#fff;border:none;border-radius:999px;font-size:1rem;cursor:pointer;backdrop-filter:blur(4px);"
+  >
+    Done signing
+  </button>
 {:else}
   <div class="flex min-h-svh flex-col items-center justify-center gap-2 bg-muted">
     <p class="text-2xl font-medium text-muted-foreground">Ready for member</p>
