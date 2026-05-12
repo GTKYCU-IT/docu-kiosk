@@ -54,6 +54,26 @@ make clean      # Remove build artifacts
 
 Load `extension/dist/` as an unpacked extension at `edge://extensions` → "Load unpacked" to manually test the extension.
 
+### Packing the extension
+
+Signing and packing must be done on a **Windows/WSL dev machine** where Edge is installed. `dist.pem` (the signing key) must be present in `extension/`.
+
+```bash
+BROKER_HOST=broker.yourdomain.local make pack
+```
+
+This produces `extension/public/docu-kiosk.crx` and `extension/public/update.xml` with the correct codebase URL baked in. Copy these to the server before running `make docker-build`:
+
+```bash
+scp extension/public/docu-kiosk.crx extension/public/update.xml user@server:~/docu-kiosk/extension/public/
+```
+
+The broker serves the packed extension at:
+- `https://broker.yourdomain.local/extension/docu-kiosk.crx`
+- `https://broker.yourdomain.local/extension/update.xml`
+
+Point your Edge management policy's `ExtensionInstallForcelist` or update URL at the `update.xml` endpoint to push the extension to MSR workstations automatically.
+
 ## Deployment
 
 The broker and frontend are deployed together as a Docker container behind Caddy, which handles TLS automatically using its built-in certificate authority.
@@ -138,6 +158,8 @@ The extension also supports enterprise MDM/GPO deployment via managed storage (`
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/trust` | Download the Caddy root CA certificate |
+| `GET` | `/extension/docu-kiosk.crx` | Signed extension CRX for manual install |
+| `GET` | `/extension/update.xml` | Auto-update manifest for Edge policy |
 | `POST` | `/api/kiosks` | Register a kiosk — returns an auth token |
 | `GET` | `/api/kiosks` | List currently connected kiosks |
 | `POST` | `/api/kiosks/{id}/sessions` | Push a signing URL to a connected kiosk |

@@ -42,7 +42,7 @@ server: web ## Build broker binary → ./server
 extension: ## Build Chrome/Edge extension → extension/dist/
 	cd extension && npm run build
 
-pack: ## Sign and pack extension → extension/public/ (requires BROKER_HOST and dist.pem)
+pack: ## Sign and pack extension → extension/public/ (dev machine only — requires Edge + dist.pem)
 	$(eval export $(shell grep '^BROKER_HOST' .env))
 	cd extension && npm run pack
 

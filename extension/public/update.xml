@@ -2,7 +2,7 @@
 <gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>
   <app appid='ndmpfjhihnpgakamhhdcpjemakdgmkcp'>
     <updatecheck
-      codebase='http://192.168.168.77:8000/docu-kiosk.crx'
-      version='1.0.4' />
+      codebase='https://docu-kiosk.gtkycu.com.local/extension/docu-kiosk.crx'
+      version='1.0.5' />
   </app>
 </gupdate>
