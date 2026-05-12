@@ -20,11 +20,11 @@ dist.pem
 dist.crx
 extension/public/docu-kiosk.crx
 
-# broker
-broker/broker
-broker/server.crt
-broker/server.key
-broker/frontend/
+# broker binary and generated files
+broker
+server.crt
+server.key
+tmp/
 
 # Editor directories and files
 .vscode/*

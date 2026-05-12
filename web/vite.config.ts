@@ -10,8 +10,14 @@ export default defineConfig({
       $lib: path.resolve('./src/lib'),
     },
   },
+  server: {
+    proxy: {
+      '/api': 'http://localhost:8080',
+      '/ws': { target: 'ws://localhost:8080', ws: true },
+    },
+  },
   build: {
-    outDir: '../broker/frontend',
+    outDir: 'dist',
     emptyOutDir: true,
   },
 })

@@ -1,4 +1,4 @@
-module docu-kiosk/broker
+module github.com/calvertjadon/docu-kiosk
 
 go 1.25.5
 

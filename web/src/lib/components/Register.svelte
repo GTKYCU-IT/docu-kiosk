@@ -1,79 +1,72 @@
 <script lang="ts">
-  import * as Card from '$lib/components/ui/card'
-  import { Button } from '$lib/components/ui/button'
-  import { Input } from '$lib/components/ui/input'
-  import { Label } from '$lib/components/ui/label'
+  import * as Card from "$lib/components/ui/card";
+  import { Button } from "$lib/components/ui/button";
+  import { Input } from "$lib/components/ui/input";
+  import { Field, FieldGroup, FieldLabel } from "$lib/components/ui/field";
+  import { toast } from "svelte-sonner";
 
-  let kioskId = $state('')
-  let secret = $state('')
-  let error = $state('')
-  let loading = $state(false)
+  let name = $state("");
+  let key = $state("");
+  let loading = $state(false);
 
   async function register(e: SubmitEvent) {
-    e.preventDefault()
-    error = ''
-    loading = true
+    e.preventDefault();
+    loading = true;
     try {
-      const res = await fetch('/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kioskId, secret }),
-      })
+      const res = await fetch("/api/kiosks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, key }),
+      });
       if (!res.ok) {
-        error = res.status === 401 ? 'Invalid secret.' : 'Registration failed.'
-        return
+        toast.error("Registration failed. Please try again.");
+        return;
       }
-      const { token } = await res.json()
-      localStorage.setItem('kioskId', kioskId)
-      localStorage.setItem('kioskToken', token)
-      location.reload()
+      const { token } = await res.json();
+      location.href = `${location.origin}/?name=${name}&token=${token}&initial=true`;
     } catch {
-      error = 'Could not reach the broker. Check your network connection.'
+      toast.error("Could not reach the server. Check your network connection.");
     } finally {
-      loading = false
+      loading = false;
     }
   }
+
+  const id = $props.id();
 </script>
 
 <div class="flex min-h-svh items-center justify-center bg-muted p-4">
   <Card.Root class="w-full max-w-sm">
     <Card.Header>
-      <Card.Title>Register Kiosk</Card.Title>
-      <Card.Description>
-        Enter the kiosk ID and registration secret provided by your IT team.
-      </Card.Description>
+      <Card.Title class="text-2xl">Register Kiosk</Card.Title>
+      <Card.Description>Give this kiosk a name to identify it.</Card.Description
+      >
     </Card.Header>
 
-    <form onsubmit={register}>
-      <Card.Content class="flex flex-col gap-4">
-        <div class="flex flex-col gap-1.5">
-          <Label for="kioskId">Kiosk ID</Label>
-          <Input
-            id="kioskId"
-            bind:value={kioskId}
-            placeholder="e.g. office-101"
-            required
-          />
-        </div>
-        <div class="flex flex-col gap-1.5">
-          <Label for="secret">Registration Secret</Label>
-          <Input
-            id="secret"
-            type="password"
-            bind:value={secret}
-            required
-          />
-        </div>
-        {#if error}
-          <p class="text-sm text-destructive">{error}</p>
-        {/if}
-      </Card.Content>
+    <Card.Content>
+      <form onsubmit={register}>
+        <FieldGroup>
+          <Field>
+            <FieldLabel for="name-{id}">Kiosk Name</FieldLabel>
+            <Input
+              id="name-{id}"
+              bind:value={name}
+              placeholder="e.g. Branch Office Kiosk 1"
+              required
+            />
+          </Field>
 
-      <Card.Footer>
-        <Button type="submit" class="w-full" disabled={loading}>
-          {loading ? 'Registering…' : 'Register'}
-        </Button>
-      </Card.Footer>
-    </form>
+          <Field>
+            <FieldLabel for="key-{id}">Secret Key</FieldLabel>
+            <Input id="key-{id}" bind:value={key} required />
+          </Field>
+
+          <Field>
+            <Button type="submit" class="w-full" disabled={loading}>
+              {loading ? "Registering…" : "Register"}
+            </Button>
+          </Field>
+        </FieldGroup>
+      </form>
+    </Card.Content>
   </Card.Root>
 </div>

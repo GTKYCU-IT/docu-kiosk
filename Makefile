@@ -1,15 +1,28 @@
-.PHONY: all build broker extension clean
+.PHONY: all build web extension clean dev dev-web dev-broker
 
 all: build
 
-build: broker extension
+build: web broker extension
 
-broker:
-	$(MAKE) -C broker build
+dev:
+	$(MAKE) -j2 dev-web dev-broker
+
+dev-web:
+	cd web && npm run dev
+
+dev-broker:
+	air
+
+web:
+	cd web && npm run build
+
+broker: web
+	go build -o broker .
 
 extension:
 	cd extension && npm run build
 
 clean:
-	$(MAKE) -C broker clean
+	rm -f broker
+	rm -rf web/dist tmp
 	cd extension && npm run build -- --emptyOutDir

@@ -1,23 +1,30 @@
 package main
 
 import (
-	"docu-kiosk/broker/internal/server"
-	"docu-kiosk/broker/internal/store"
 	"log"
+	"os"
+
+	"github.com/calvertjadon/docu-kiosk/internal/server"
 )
 
 func main() {
-	store, err := store.NewInMemoryClientStore()
-	if err != nil {
-		log.Fatalf("error creating client store: %s", err)
-	}
+	tokenSecret := mustEnv("DOCU_KIOSK_TOKEN_SECRET")
+	registrationKey := mustEnv("DOCU_KIOSK_REGISTRATION_KEY")
 
-	server, err := server.NewServer(store, 8080)
+	srv, err := server.NewServer(8080, tokenSecret, registrationKey)
 	if err != nil {
 		log.Fatalf("error creating server: %s", err)
 	}
 
-	if err := server.Start(); err != nil {
+	if err := srv.Start(); err != nil {
 		log.Fatalf("error stopping server: %s", err)
 	}
+}
+
+func mustEnv(key string) string {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		log.Fatalf("required environment variable %s is not set", key)
+	}
+	return v
 }

@@ -1,40 +1,47 @@
-// Package server
+// Package server wires together auth, hub, routes, and HTTP lifecycle.
 package server
 
 import (
 	"context"
-	"docu-kiosk/broker/internal/api"
-	"docu-kiosk/broker/internal/domain"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/calvertjadon/docu-kiosk/internal/auth"
+	"github.com/calvertjadon/docu-kiosk/internal/hub"
 )
 
 type server struct {
-	api        *api.API
-	port       int
-	httpServer *http.Server
+	auth            *auth.Auth
+	hub             *hub.Hub
+	registrationKey string
+	httpServer      *http.Server
+	port            int
 }
 
-func NewServer(store domain.ClientStore, port int) (server, error) {
-	if store == nil {
-		return server{}, errors.New("ClientStore is required")
+func NewServer(port int, tokenSecret, registrationKey string) (server, error) {
+	s := server{
+		auth:            auth.New(tokenSecret),
+		hub:             hub.New(),
+		registrationKey: registrationKey,
+		port:            port,
 	}
 
-	api := api.NewAPI(store)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/kiosks", s.handleRegister)
+	mux.HandleFunc("GET /api/kiosks", s.handleListKiosks)
+	mux.HandleFunc("/ws", s.handleWS)
+	mux.Handle("/", http.FileServer(http.Dir("./web/dist")))
 
-	return server{
-		api:  api,
-		port: port,
-		httpServer: &http.Server{
-			Addr:    fmt.Sprintf(":%d", port),
-			Handler: NewRouter(api),
-		},
-	}, nil
+	s.httpServer = &http.Server{
+		Addr:    fmt.Sprintf(":%d", port),
+		Handler: mux,
+	}
+
+	return s, nil
 }
 
 func (s *server) Start() error {
