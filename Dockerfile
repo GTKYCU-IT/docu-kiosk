@@ -18,6 +18,7 @@ RUN addgroup -S app && adduser -S -G app app
 WORKDIR /app
 COPY --from=backend /build/server .
 COPY --from=frontend /build/dist ./web/dist
+COPY extension/public/ ./extension/public/
 USER app
 EXPOSE 8080
 CMD ["./server"]
