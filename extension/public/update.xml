@@ -3,6 +3,6 @@
   <app appid='ndmpfjhihnpgakamhhdcpjemakdgmkcp'>
     <updatecheck
       codebase='https://docu-kiosk.gtkycu.com.local/extension/docu-kiosk.crx'
-      version='1.0.5' />
+      version='1.0.6' />
   </app>
 </gupdate>

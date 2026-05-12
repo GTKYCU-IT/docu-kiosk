@@ -16,6 +16,7 @@
     | "signing";
   let view = $state<View>(token ? "validating" : "register");
   let kioskName = $state("");
+  let signingUrl = $state("");
 
   onMount(() => {
     if (!token) return;
@@ -38,6 +39,7 @@
           view = "waiting";
         }
       } else if (msg.type === "sign") {
+        signingUrl = msg.url;
         view = "signing";
       }
     };
@@ -53,7 +55,7 @@
 {:else if view === "add-to-homescreen"}
   <AddToHomeScreen {token} onDone={() => (view = "waiting")} />
 {:else if view === "signing"}
-  <!-- signing view placeholder -->
+  <iframe src={signingUrl} title="DocuSign" style="position:fixed;inset:0;width:100%;height:100%;border:none;"></iframe>
 {:else}
   <div class="flex min-h-svh flex-col items-center justify-center gap-2 bg-muted">
     <p class="text-2xl font-medium text-muted-foreground">Ready for member</p>
