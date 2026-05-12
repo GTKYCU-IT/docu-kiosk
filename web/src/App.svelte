@@ -38,6 +38,13 @@
         view = "signing";
       }
     };
+
+    window.addEventListener("message", (e) => {
+      if (e.data?.type === "signed") {
+        signingUrl = "";
+        view = "waiting";
+      }
+    });
   });
 </script>
 
