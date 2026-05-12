@@ -4,42 +4,31 @@
   import AddToHomeScreen from "$lib/components/AddToHomeScreen.svelte";
   import { Toaster } from "$lib/components/ui/sonner/index.js";
 
-  const params = new URLSearchParams(location.search);
-  const initial = params.has("initial");
-
-  // True when running as an installed PWA (iOS standalone or display-mode: standalone).
-  // navigator.standalone is iOS-specific; matchMedia covers other platforms.
   const isStandalone =
     (navigator as any).standalone === true ||
     window.matchMedia("(display-mode: standalone)").matches;
 
-  // Token arrives in the URL on first registration. Persist it in localStorage
-  // so the PWA can reconnect on subsequent launches from start_url ("/"), where
-  // the query string is stripped by iOS.
-  let token = params.get("token");
-  if (token) {
-    localStorage.setItem("kiosk-token", token);
-  } else {
-    token = localStorage.getItem("kiosk-token");
-  }
+  const token = localStorage.getItem("kiosk-token");
 
-  type View =
-    | "register"
-    | "validating"
-    | "add-to-homescreen"
-    | "waiting"
-    | "signing";
-  let view = $state<View>(token ? "validating" : "register");
+  type View = "install" | "register" | "validating" | "waiting" | "signing";
+
+  let view = $state<View>(() => {
+    if (!isStandalone) return "install";
+    if (token) return "validating";
+    return "register";
+  });
+
   let kioskName = $state("");
   let signingUrl = $state("");
 
   onMount(() => {
-    if (!token) return;
+    if (view !== "validating") return;
 
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${protocol}//${location.host}/ws?token=${token}`);
 
     ws.onerror = () => {
+      localStorage.removeItem("kiosk-token");
       view = "register";
     };
 
@@ -47,12 +36,7 @@
       const msg = JSON.parse(data);
       if (msg.type === "connected") {
         kioskName = msg.name;
-        if (initial && !isStandalone) {
-          history.replaceState({}, "", `/?token=${token}`);
-          view = "add-to-homescreen";
-        } else {
-          view = "waiting";
-        }
+        view = "waiting";
       } else if (msg.type === "sign") {
         signingUrl = msg.url;
         view = "signing";
@@ -63,12 +47,12 @@
 
 <Toaster position="top-center" />
 
-{#if view === "register"}
+{#if view === "install"}
+  <AddToHomeScreen />
+{:else if view === "register"}
   <Register />
 {:else if view === "validating"}
-  <!-- intentionally blank while validating -->
-{:else if view === "add-to-homescreen"}
-  <AddToHomeScreen {token} onDone={() => (view = "waiting")} />
+  <!-- intentionally blank while connecting -->
 {:else if view === "signing"}
   <iframe src={signingUrl} title="DocuSign" style="position:fixed;inset:0;width:100%;height:100%;border:none;"></iframe>
 {:else}

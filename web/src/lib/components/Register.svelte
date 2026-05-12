@@ -23,7 +23,8 @@
         return;
       }
       const { token } = await res.json();
-      location.href = `${location.origin}/?name=${name}&token=${token}&initial=true`;
+      localStorage.setItem("kiosk-token", token);
+      location.reload();
     } catch {
       toast.error("Could not reach the server. Check your network connection.");
     } finally {
