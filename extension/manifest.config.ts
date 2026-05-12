@@ -14,6 +14,7 @@ export default defineManifest({
     default_icon: {
       48: 'public/logo.png'
     },
+    default_popup: 'src/popup/index.html',
   },
 
   permissions: [

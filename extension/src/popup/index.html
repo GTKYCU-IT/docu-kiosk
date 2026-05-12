@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Send to Kiosk</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0;
+        padding: 16px;
+        min-width: 320px;
+      }
+      h2 {
+        margin: 0 0 12px;
+        font-size: 1rem;
+      }
+      #status {
+        margin: 0 0 12px;
+        color: #555;
+        font-size: 0.875rem;
+      }
+      #kiosk-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      button {
+        padding: 10px 14px;
+        font-size: 0.9rem;
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        background: #fff;
+        cursor: pointer;
+        text-align: left;
+      }
+      button:hover:not(:disabled) {
+        background: #f0f0f0;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Send to Kiosk</h2>
+    <p id="status">Loading...</p>
+    <div id="kiosk-list"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

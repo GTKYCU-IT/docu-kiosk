@@ -1,8 +1,30 @@
 import { getConfig } from './config'
-import type { Config } from './config'
 
-let config: Config = { kioskId: 'unknown-kiosk', brokerUrl: '', kioskUrl: '' }
-getConfig().then(c => { config = c })
+getConfig().then(config => {
+  chrome.webRequest.onBeforeRequest.addListener((details) => {
+    const url = captureSigningUrl(details)
+
+    chrome.storage.session.set({ pendingSigningUrl: url })
+    chrome.windows.create({
+      url: chrome.runtime.getURL('src/popup/index.html'),
+      type: 'popup',
+      width: 400,
+      height: 280,
+      focused: true,
+    })
+
+    if (config.kioskUrl) {
+      console.log('Intercepted signing URL:', url)
+    }
+
+    return { cancel: true }
+  }, {
+    urls: [
+      '*://*.docusign.net/*',
+      '*://*.docusign.com/*',
+    ]
+  }, ['requestBody', 'blocking'])
+})
 
 function captureSigningUrl(details: chrome.webRequest.OnBeforeRequestDetails): string {
   let url = details.url
@@ -21,36 +43,3 @@ function captureSigningUrl(details: chrome.webRequest.OnBeforeRequestDetails): s
 
   return url
 }
-
-function injectReturnUrl(signingUrl: string, kioskId: string, kioskUrl: string): string {
-  try {
-    const url = new URL(signingUrl)
-    url.searchParams.set('returnUrl', `${kioskUrl}?id=${kioskId}`)
-    return url.toString()
-  } catch {
-    return signingUrl
-  }
-}
-
-console.log('DocuSign interceptor loaded')
-chrome.webRequest.onBeforeRequest.addListener((details) => {
-  const raw = captureSigningUrl(details)
-  const url = config.kioskUrl ? injectReturnUrl(raw, config.kioskId, config.kioskUrl) : raw
-
-  console.log('Intercepted signing URL:', url)
-
-  if (config.brokerUrl) {
-    fetch(config.brokerUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ kioskId: config.kioskId, url })
-    }).catch(err => console.error('Broker call failed:', err))
-  }
-
-  return { cancel: true }
-}, {
-  urls: [
-    '*://*.docusign.net/*',
-    '*://*.docusign.com/*',
-  ]
-}, ['requestBody', 'blocking'])

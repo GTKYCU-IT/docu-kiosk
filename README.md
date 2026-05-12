@@ -9,9 +9,10 @@ When a core banking application opens a DocuSign signing URL, the MSR's browser 
 **Flow:**
 1. Core banking app opens a DocuSign URL in the browser
 2. A Chrome/Edge extension intercepts the request and cancels it (so it doesn't open on the MSR's screen)
-3. The extension POSTs the signing URL to the broker, along with the kiosk ID
-4. The broker pushes the URL to the paired kiosk over a WebSocket
-5. The member sees and signs the document on their own screen
+3. The extension opens a picker showing all currently connected kiosks
+4. The MSR selects a kiosk; the extension POSTs the signing URL to the broker
+5. The broker pushes the URL to the selected kiosk over a WebSocket
+6. The member sees and signs the document on their own screen
 
 ## Components
 
@@ -22,7 +23,7 @@ A Go HTTP server that manages kiosk WebSocket connections and receives push requ
 A Svelte SPA served by the broker. Kiosks register with a name and a secret key, receive a token, then save the page as a home screen shortcut. On each load the token is used to authenticate and establish a WebSocket connection. When the broker pushes a signing URL, the kiosk displays the DocuSign iframe.
 
 ### Extension (`extension/`)
-A Manifest V3 Chrome/Edge extension installed on MSR workstations. Intercepts requests to `*.docusign.net` and `*.docusign.com`, forwards the signing URL to the broker, and cancels the original request. Configured via an options page (broker URL and kiosk ID).
+A Manifest V3 Chrome/Edge extension installed on MSR workstations. Intercepts requests to `*.docusign.net` and `*.docusign.com` and cancels them. Opens a popup listing all currently connected kiosks so the MSR can choose where to send the document. Configured via an options page (broker URL).
 
 ## Development
 
@@ -122,7 +123,6 @@ Configure via the extension's options page (`edge://extensions` → DocuSign Kio
 | Option | Description |
 |---|---|
 | Broker URL | Base URL of the broker, e.g. `https://broker.yourdomain.local` |
-| Kiosk ID | ID of the kiosk to push signing URLs to (from `GET /api/kiosks`) |
 
 The extension also supports enterprise MDM/GPO deployment via managed storage (`chrome.storage.managed`), which pre-configures options across all workstations without manual setup.
 
