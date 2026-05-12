@@ -1,8 +1,3 @@
 #!/bin/bash
-
-echo "creating server.key"
-openssl genrsa -out server.key 2048
-openssl ecparam -genkey -name secp384r1 out server.key
-
-echo "creating server.crt"
-openssl req -new -x509 -sha256 -key server.key -out server.crt -batch -days 365
+set -e
+openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes -batch

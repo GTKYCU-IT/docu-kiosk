@@ -20,14 +20,18 @@ type server struct {
 	registrationKey string
 	httpServer      *http.Server
 	port            int
+	certFile        string
+	keyFile         string
 }
 
-func NewServer(port int, tokenSecret, registrationKey string) (server, error) {
+func NewServer(port int, tokenSecret, registrationKey, certFile, keyFile string) (server, error) {
 	s := server{
 		auth:            auth.New(tokenSecret),
 		hub:             hub.New(),
 		registrationKey: registrationKey,
 		port:            port,
+		certFile:        certFile,
+		keyFile:         keyFile,
 	}
 
 	mux := http.NewServeMux()
@@ -45,12 +49,13 @@ func NewServer(port int, tokenSecret, registrationKey string) (server, error) {
 }
 
 func (s *server) Start() error {
-	log.Printf("starting server on port %d", s.port)
+	log.Printf("starting server on port %d (TLS)", s.port)
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		err := s.httpServer.ListenAndServeTLS(s.certFile, s.keyFile)
+		if err != nil && err != http.ErrServerClosed {
 			log.Fatalf("error when running server: %s", err)
 		}
 	}()
