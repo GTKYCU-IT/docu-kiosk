@@ -1,0 +1,8 @@
+{
+	admin off
+}
+
+{$BROKER_HOST} {
+	tls internal
+	reverse_proxy app:8080
+}

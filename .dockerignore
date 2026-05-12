@@ -1,0 +1,10 @@
+web/node_modules/
+web/dist/
+extension/
+dist/
+release/
+tmp/
+.env
+*.pem
+*.crt
+*.key

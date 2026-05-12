@@ -13,6 +13,9 @@ release
 dist-ssr
 *.local
 
+# secrets — never commit
+.env
+
 # private signing key — keep this out of version control
 dist.pem
 
