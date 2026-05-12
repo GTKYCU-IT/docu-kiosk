@@ -60,7 +60,7 @@ docker-down: ## Stop stack
 CERT_FILE ?= docu-kiosk-ca.crt
 
 cert-export: ## Export Caddy's root CA cert for distribution (→ docu-kiosk-ca.crt)
-	docker compose exec caddy cat /data/pki/authorities/local/root.crt > $(CERT_FILE)
+	docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt > $(CERT_FILE)
 	@echo "Exported to $(CERT_FILE) — distribute to MSR workstations and kiosk tablets"
 
 ## Help
