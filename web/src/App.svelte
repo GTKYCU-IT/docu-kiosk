@@ -5,8 +5,16 @@
   import { Toaster } from "$lib/components/ui/sonner/index.js";
 
   const params = new URLSearchParams(location.search);
-  const token = params.get("token");
   const initial = params.has("initial");
+
+  // Token arrives in the URL on first registration. Persist it so the PWA
+  // can launch from start_url ("/") on subsequent loads without losing auth.
+  let token = params.get("token");
+  if (token) {
+    localStorage.setItem("kiosk-token", token);
+  } else {
+    token = localStorage.getItem("kiosk-token");
+  }
 
   type View =
     | "register"
