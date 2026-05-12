@@ -26,7 +26,7 @@ export default defineManifest({
   host_permissions: [
     'https://*.docusign.net/*',
     'https://*.docusign.com/*',
-    'https://your-broker.internal/*'
+    'https://*.local/*'
   ],
 
   background: {
