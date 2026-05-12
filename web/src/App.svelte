@@ -7,8 +7,15 @@
   const params = new URLSearchParams(location.search);
   const initial = params.has("initial");
 
-  // Token arrives in the URL on first registration. Persist it so the PWA
-  // can launch from start_url ("/") on subsequent loads without losing auth.
+  // True when running as an installed PWA (iOS standalone or display-mode: standalone).
+  // navigator.standalone is iOS-specific; matchMedia covers other platforms.
+  const isStandalone =
+    (navigator as any).standalone === true ||
+    window.matchMedia("(display-mode: standalone)").matches;
+
+  // Token arrives in the URL on first registration. Persist it in localStorage
+  // so the PWA can reconnect on subsequent launches from start_url ("/"), where
+  // the query string is stripped by iOS.
   let token = params.get("token");
   if (token) {
     localStorage.setItem("kiosk-token", token);
@@ -40,7 +47,7 @@
       const msg = JSON.parse(data);
       if (msg.type === "connected") {
         kioskName = msg.name;
-        if (initial) {
+        if (initial && !isStandalone) {
           history.replaceState({}, "", `/?token=${token}`);
           view = "add-to-homescreen";
         } else {
