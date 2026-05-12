@@ -10,7 +10,7 @@
 
   const token = localStorage.getItem("kiosk-token");
 
-  type View = "install" | "register" | "validating" | "waiting" | "signing";
+  type View = "install" | "register" | "validating" | "reconnecting" | "waiting" | "signing";
 
   let view = $state<View>(!isStandalone ? "install" : token ? "validating" : "register");
 
@@ -30,32 +30,42 @@
   onMount(() => {
     if (view !== "validating") return;
 
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${protocol}//${location.host}/ws?token=${token}`);
+    let reconnectTimer: number;
 
-    ws.onerror = () => {
-      localStorage.removeItem("kiosk-token");
-      view = "register";
-    };
+    function connect() {
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      const ws = new WebSocket(`${protocol}//${location.host}/ws?token=${token}`);
+      let authenticated = false;
 
-    ws.onmessage = ({ data }) => {
-      const msg = JSON.parse(data);
-      if (msg.type === "connected") {
-        kioskName = msg.name;
-        view = "waiting";
-      } else if (msg.type === "sign") {
-        signingUrl = msg.url;
-        signingInitialLoad = true;
-        view = "signing";
-      }
-    };
+      ws.onerror = () => {};
 
-    window.addEventListener("message", (e) => {
-      if (e.data?.type === "signed") {
-        signingUrl = "";
-        view = "waiting";
-      }
-    });
+      ws.onclose = () => {
+        if (authenticated) {
+          view = "reconnecting";
+          reconnectTimer = window.setTimeout(connect, 3000);
+        } else {
+          localStorage.removeItem("kiosk-token");
+          view = "register";
+        }
+      };
+
+      ws.onmessage = ({ data }) => {
+        const msg = JSON.parse(data);
+        if (msg.type === "connected") {
+          authenticated = true;
+          kioskName = msg.name;
+          view = "waiting";
+        } else if (msg.type === "sign") {
+          signingUrl = msg.url;
+          signingInitialLoad = true;
+          view = "signing";
+        }
+      };
+    }
+
+    connect();
+
+    return () => clearTimeout(reconnectTimer);
   });
 </script>
 
@@ -65,16 +75,14 @@
   <AddToHomeScreen />
 {:else if view === "register"}
   <Register />
+{:else if view === "reconnecting"}
+  <div class="flex min-h-svh flex-col items-center justify-center gap-2 bg-muted">
+    <p class="text-2xl font-medium text-muted-foreground">Reconnecting…</p>
+  </div>
 {:else if view === "validating"}
   <!-- intentionally blank while connecting -->
 {:else if view === "signing"}
   <iframe src={signingUrl} title="DocuSign" onload={handleSigningLoad} style="position:fixed;inset:0;width:100%;height:100%;border:none;"></iframe>
-  <button
-    onclick={() => { signingUrl = ""; view = "waiting"; }}
-    style="position:fixed;bottom:2rem;left:50%;translate:-50% 0;z-index:9999;padding:0.75rem 2rem;background:rgba(0,0,0,0.7);color:#fff;border:none;border-radius:999px;font-size:1rem;cursor:pointer;backdrop-filter:blur(4px);"
-  >
-    Done signing
-  </button>
 {:else}
   <div class="flex min-h-svh flex-col items-center justify-center gap-2 bg-muted">
     <p class="text-2xl font-medium text-muted-foreground">Ready for member</p>

@@ -4,13 +4,14 @@ getConfig().then(config => {
   chrome.webRequest.onBeforeRequest.addListener((details) => {
     const url = captureSigningUrl(details)
 
-    chrome.storage.session.set({ pendingSigningUrl: url })
-    chrome.windows.create({
-      url: chrome.runtime.getURL('src/popup/index.html'),
-      type: 'popup',
-      width: 400,
-      height: 280,
-      focused: true,
+    chrome.storage.session.set({ pendingSigningUrl: url }).then(() => {
+      chrome.windows.create({
+        url: chrome.runtime.getURL('src/popup/index.html'),
+        type: 'popup',
+        width: 400,
+        height: 280,
+        focused: true,
+      })
     })
 
     if (config.kioskUrl) {
