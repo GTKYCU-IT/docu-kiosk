@@ -22,6 +22,7 @@ dist.pem
 # build artifacts
 dist.crx
 extension/public/docu-kiosk.crx
+extension/public/update.xml
 
 # broker binary and generated files
 broker
