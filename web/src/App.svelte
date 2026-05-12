@@ -12,11 +12,7 @@
 
   type View = "install" | "register" | "validating" | "waiting" | "signing";
 
-  let view = $state<View>(() => {
-    if (!isStandalone) return "install";
-    if (token) return "validating";
-    return "register";
-  });
+  let view = $state<View>(!isStandalone ? "install" : token ? "validating" : "register");
 
   let kioskName = $state("");
   let signingUrl = $state("");
