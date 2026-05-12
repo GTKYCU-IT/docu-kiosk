@@ -16,6 +16,16 @@
 
   let kioskName = $state("");
   let signingUrl = $state("");
+  let signingInitialLoad = true;
+
+  function handleSigningLoad() {
+    if (signingInitialLoad) {
+      signingInitialLoad = false;
+      return;
+    }
+    signingUrl = "";
+    view = "waiting";
+  }
 
   onMount(() => {
     if (view !== "validating") return;
@@ -35,6 +45,7 @@
         view = "waiting";
       } else if (msg.type === "sign") {
         signingUrl = msg.url;
+        signingInitialLoad = true;
         view = "signing";
       }
     };
@@ -57,7 +68,7 @@
 {:else if view === "validating"}
   <!-- intentionally blank while connecting -->
 {:else if view === "signing"}
-  <iframe src={signingUrl} title="DocuSign" style="position:fixed;inset:0;width:100%;height:100%;border:none;"></iframe>
+  <iframe src={signingUrl} title="DocuSign" onload={handleSigningLoad} style="position:fixed;inset:0;width:100%;height:100%;border:none;"></iframe>
   <button
     onclick={() => { signingUrl = ""; view = "waiting"; }}
     style="position:fixed;bottom:2rem;left:50%;translate:-50% 0;z-index:9999;padding:0.75rem 2rem;background:rgba(0,0,0,0.7);color:#fff;border:none;border-radius:999px;font-size:1rem;cursor:pointer;backdrop-filter:blur(4px);"
