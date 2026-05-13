@@ -45,17 +45,17 @@ jobs:
           tags: |
             type=raw,value=latest
             type=sha,format=short
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
       - uses: actions/upload-artifact@v4
         with:
           name: extension-${{ github.sha }}
           path: |
             extension/public/docu-kiosk.crx
             extension/public/update.xml
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
 
   deploy:
     needs: docker-push
