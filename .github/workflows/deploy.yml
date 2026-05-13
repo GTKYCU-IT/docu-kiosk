@@ -32,3 +32,19 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+
+  deploy:
+    needs: docker-push
+    runs-on: docu-kiosk
+    permissions:
+      packages: read
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: docker compose pull
+        working-directory: /home/gtky/docu-kiosk
+      - run: docker compose up -d
+        working-directory: /home/gtky/docu-kiosk
