@@ -3,8 +3,6 @@ services:
     image: ghcr.io/calvertjadon/docu-kiosk:latest
     env_file: .env
     restart: unless-stopped
-    volumes:
-      - ./extension/public:/app/extension/public:ro
 
   caddy:
     image: caddy:2-alpine

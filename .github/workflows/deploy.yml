@@ -15,6 +15,24 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - run: npm ci
+        working-directory: extension
+      - name: Write signing key
+        run: echo "${{ secrets.DIST_PEM_B64 }}" | base64 -d > dist.pem
+        working-directory: extension
+      - name: Install Chrome
+        run: |
+          wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y /tmp/chrome.deb
+      - run: npm run pack
+        working-directory: extension
+        env:
+          BROKER_HOST: ${{ secrets.BROKER_HOST }}
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
