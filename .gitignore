@@ -30,6 +30,8 @@ server.crt
 server.key
 tmp/
 
+CLAUDE.md
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
