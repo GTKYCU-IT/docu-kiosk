@@ -1,6 +1,6 @@
 services:
   app:
-    image: ghcr.io/calvertjadon/docu-kiosk:latest
+    image: ghcr.io/gtkycu-it/docu-kiosk:latest
     env_file: .env
     restart: unless-stopped
 

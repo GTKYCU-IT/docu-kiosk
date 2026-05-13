@@ -1,9 +1,9 @@
 # docu-kiosk
 
-[![CI](https://github.com/calvertjadon/docu-kiosk/actions/workflows/ci.yml/badge.svg)](https://github.com/calvertjadon/docu-kiosk/actions/workflows/ci.yml)
-[![Deploy](https://github.com/calvertjadon/docu-kiosk/actions/workflows/deploy.yml/badge.svg)](https://github.com/calvertjadon/docu-kiosk/actions/workflows/deploy.yml)
-[![Release](https://github.com/calvertjadon/docu-kiosk/actions/workflows/release.yml/badge.svg)](https://github.com/calvertjadon/docu-kiosk/actions/workflows/release.yml)
-[![GitHub release](https://img.shields.io/github/v/release/calvertjadon/docu-kiosk)](https://github.com/calvertjadon/docu-kiosk/releases/latest)
+[![CI](https://github.com/GTKYCU-IT/docu-kiosk/actions/workflows/ci.yml/badge.svg)](https://github.com/GTKYCU-IT/docu-kiosk/actions/workflows/ci.yml)
+[![Deploy](https://github.com/GTKYCU-IT/docu-kiosk/actions/workflows/deploy.yml/badge.svg)](https://github.com/GTKYCU-IT/docu-kiosk/actions/workflows/deploy.yml)
+[![Release](https://github.com/GTKYCU-IT/docu-kiosk/actions/workflows/release.yml/badge.svg)](https://github.com/GTKYCU-IT/docu-kiosk/actions/workflows/release.yml)
+[![GitHub release](https://img.shields.io/github/v/release/GTKYCU-IT/docu-kiosk)](https://github.com/GTKYCU-IT/docu-kiosk/releases/latest)
 
 A system for routing DocuSign signing sessions from an MSR's workstation to a member-facing kiosk at a credit union or bank branch.
 
