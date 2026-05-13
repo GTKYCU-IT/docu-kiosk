@@ -37,6 +37,7 @@ jobs:
     needs: docker-push
     runs-on: self-hosted
     permissions:
+      contents: read
       packages: read
     steps:
       - uses: actions/checkout@v4
