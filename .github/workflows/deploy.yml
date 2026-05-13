@@ -35,7 +35,7 @@ jobs:
 
   deploy:
     needs: docker-push
-    runs-on: docu-kiosk
+    runs-on: self-hosted
     permissions:
       packages: read
     steps:
