@@ -1,5 +1,10 @@
 # docu-kiosk
 
+[![CI](https://github.com/calvertjadon/docu-kiosk/actions/workflows/ci.yml/badge.svg)](https://github.com/calvertjadon/docu-kiosk/actions/workflows/ci.yml)
+[![Deploy](https://github.com/calvertjadon/docu-kiosk/actions/workflows/deploy.yml/badge.svg)](https://github.com/calvertjadon/docu-kiosk/actions/workflows/deploy.yml)
+[![Release](https://github.com/calvertjadon/docu-kiosk/actions/workflows/release.yml/badge.svg)](https://github.com/calvertjadon/docu-kiosk/actions/workflows/release.yml)
+[![GitHub release](https://img.shields.io/github/v/release/calvertjadon/docu-kiosk)](https://github.com/calvertjadon/docu-kiosk/releases/latest)
+
 A system for routing DocuSign signing sessions from an MSR's workstation to a member-facing kiosk at a credit union or bank branch.
 
 ## How it works
@@ -54,38 +59,13 @@ make clean      # Remove build artifacts
 
 Load `extension/dist/` as an unpacked extension at `edge://extensions` → "Load unpacked" to manually test the extension.
 
-### Packing the extension
-
-Signing and packing must be done on a **Windows/WSL dev machine** where Edge is installed. `dist.pem` (the signing key) must be present in `extension/`.
-
-```bash
-BROKER_HOST=broker.yourdomain.local make pack
-```
-
-This produces `extension/public/docu-kiosk.crx` and `extension/public/update.xml` with the correct codebase URL baked in. Copy these to the server before running `make docker-build`:
-
-```bash
-scp extension/public/docu-kiosk.crx extension/public/update.xml user@server:~/docu-kiosk/extension/public/
-```
-
-The broker serves the packed extension at:
-- `https://broker.yourdomain.local/extension/docu-kiosk.crx`
-- `https://broker.yourdomain.local/extension/update.xml`
-
-Point your Edge management policy's `ExtensionInstallForcelist` or update URL at the `update.xml` endpoint to push the extension to MSR workstations automatically.
-
 ## Deployment
 
-The broker and frontend are deployed together as a Docker container behind Caddy, which handles TLS automatically using its built-in certificate authority.
+The broker and frontend are deployed together as a Docker container behind Caddy, which handles TLS automatically using its built-in certificate authority. Deployments are automated via GitHub Actions — see the [DevOps wiki](../../wiki/DevOps) for full details.
 
 ### First-time setup
 
-**1. Clone the repo onto the server**
-```bash
-git clone <repo-url> docu-kiosk && cd docu-kiosk
-```
-
-**2. Create your `.env` file**
+**1. Create your `.env` file on the server**
 ```bash
 cp .env.example .env
 ```
@@ -97,14 +77,14 @@ DOCU_KIOSK_REGISTRATION_KEY=<long random string>
 BROKER_HOST=broker.yourdomain.local
 ```
 
-**3. Create an internal DNS A record** pointing `broker.yourdomain.local` to the server's IP.
+**2. Create an internal DNS A record** pointing `broker.yourdomain.local` to the server's IP.
 
-**4. Start the stack**
+**3. Start the stack**
 ```bash
-docker compose up -d
+docker compose pull && docker compose up -d
 ```
 
-**5. Export the root certificate** for distribution to client devices:
+**4. Export the root certificate** for distribution to client devices:
 ```bash
 make cert-export
 ```
@@ -114,17 +94,9 @@ This writes `docu-kiosk-ca.crt` to the current directory. To use a different fil
 make cert-export CERT_FILE=my-ca.crt
 ```
 
-**6. Distribute the root certificate**
+**5. Distribute the root certificate**
 - **MSR workstations (domain-joined):** deploy via GPO → `Computer Configuration → Policies → Windows Settings → Security Settings → Public Key Policies → Trusted Root Certification Authorities`
 - **Kiosk tablets (iPad):** Settings → install profile → General → Certificate Trust Settings → enable full trust. Or deploy via MDM.
-
-### Updating
-
-```bash
-git pull
-make docker-build
-make docker-up
-```
 
 ## Configuration
 
