@@ -39,12 +39,14 @@ jobs:
     permissions:
       packages: read
     steps:
+      - uses: actions/checkout@v4
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - run: cp /home/gtky/docu-kiosk/.env .env
       - run: docker compose pull
-        working-directory: /home/gtky/docu-kiosk
+        working-directory: ${{ github.workspace }}
       - run: docker compose up -d
-        working-directory: /home/gtky/docu-kiosk
+        working-directory: ${{ github.workspace }}
