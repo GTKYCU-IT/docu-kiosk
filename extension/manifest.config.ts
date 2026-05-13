@@ -14,13 +14,13 @@ export default defineManifest({
     default_icon: {
       48: 'public/logo.png'
     },
-    default_popup: 'src/popup/index.html',
+    default_popup: 'src/intercepted/index.html',
   },
 
   permissions: [
     'webRequest',
     'webRequestBlocking',
-    'storage'
+    'storage',
   ],
 
   host_permissions: [
@@ -33,7 +33,7 @@ export default defineManifest({
     "service_worker": "src/background.ts"
   },
 
-  options_page: 'src/options/index.html',
+  options_page: 'src/intercepted/index.html',
 
   web_accessible_resources: [
     {

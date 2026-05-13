@@ -1,44 +1,23 @@
 import { getConfig } from './config'
 
-const bypassUrls = new Set<string>()
+if (typeof globalThis.chrome !== 'undefined') {
+  getConfig().then(() => {
+    chrome.webRequest.onBeforeRequest.addListener((details) => {
+      const url = captureSigningUrl(details)
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg.type === 'openLocally' && typeof msg.url === 'string') {
-    bypassUrls.add(msg.url)
-    sendResponse({ ok: true })
-  }
-  return true
-})
+      chrome.storage.session.set({ pendingSigningUrl: url })
 
-getConfig().then(() => {
-  chrome.webRequest.onBeforeRequest.addListener((details) => {
-    const url = captureSigningUrl(details)
+      return { redirectUrl: chrome.runtime.getURL('src/intercepted/index.html') }
+    }, {
+      urls: [
+        '*://*.docusign.net/*',
+        '*://*.docusign.com/*',
+      ]
+    }, ['requestBody', 'blocking'])
+  })
+}
 
-    if (bypassUrls.has(url)) {
-      bypassUrls.delete(url)
-      return {}
-    }
-
-    chrome.storage.session.set({ pendingSigningUrl: url }).then(() => {
-      chrome.windows.create({
-        url: chrome.runtime.getURL('src/popup/index.html'),
-        type: 'popup',
-        width: 400,
-        height: 280,
-        focused: true,
-      })
-    })
-
-    return { redirectUrl: chrome.runtime.getURL('src/intercepted/index.html') }
-  }, {
-    urls: [
-      '*://*.docusign.net/*',
-      '*://*.docusign.com/*',
-    ]
-  }, ['requestBody', 'blocking'])
-})
-
-function captureSigningUrl(details: chrome.webRequest.OnBeforeRequestDetails): string {
+export function captureSigningUrl(details: chrome.webRequest.OnBeforeRequestDetails): string {
   let url = details.url
 
   if (details.method === 'POST' && details.requestBody?.formData) {

@@ -5,7 +5,7 @@ export type Config = {
 
 export async function getConfig(): Promise<Config> {
   const [managed, local] = await Promise.all([
-    chrome.storage.managed.get(['brokerUrl', 'kioskUrl']),
+    chrome.storage.managed.get(['brokerUrl', 'kioskUrl']).catch(() => ({})),
     chrome.storage.local.get(['brokerUrl', 'kioskUrl'])
   ]) as [Partial<Config>, Partial<Config>]
 
