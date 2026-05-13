@@ -1,4 +1,4 @@
-import { execFileSync, execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import { existsSync, renameSync, readFileSync, writeFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
@@ -14,17 +14,16 @@ if (!brokerHost) {
 }
 const CODEBASE_URL = `https://${brokerHost}/extension/docu-kiosk.crx`
 
-const edgeCandidates = [
-  '/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-  '/mnt/c/Program Files/Microsoft/Edge/Application/msedge.exe',
+const chromeCandidates = [
+  '/usr/bin/google-chrome',
+  '/usr/bin/chromium-browser',
+  '/usr/bin/chromium',
 ]
-const edgeBin = edgeCandidates.find(p => existsSync(p)) ?? 'msedge'
+const chromeBin = chromeCandidates.find(p => existsSync(p)) ?? 'google-chrome'
 
-const toWin = p => execSync(`wslpath -w "${p}"`).toString().trim()
-
-execFileSync(edgeBin, [
-  `--pack-extension=${toWin(join(root, 'dist'))}`,
-  `--pack-extension-key=${toWin(join(root, 'dist.pem'))}`,
+execFileSync(chromeBin, [
+  `--pack-extension=${join(root, 'dist')}`,
+  `--pack-extension-key=${join(root, 'dist.pem')}`,
 ], { stdio: 'inherit' })
 
 renameSync(join(root, 'dist.crx'), join(root, 'public', 'docu-kiosk.crx'))
