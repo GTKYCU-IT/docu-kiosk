@@ -26,6 +26,7 @@ extension/public/update.xml
 
 # broker binary and generated files
 broker
+server
 server.crt
 server.key
 tmp/
