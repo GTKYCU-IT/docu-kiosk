@@ -60,8 +60,8 @@ func waitFor(t *testing.T, condition func() bool) {
 	t.Fatal("condition not met within 1 second")
 }
 
-func wsURL(ts *httptest.Server, token string) string {
-	return "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?token=" + token
+func wsURL(ts *httptest.Server) string {
+	return "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
 }
 
 // connectWS dials the WebSocket endpoint and reads the initial "connected"
@@ -69,7 +69,9 @@ func wsURL(ts *httptest.Server, token string) string {
 // returned name is the one the server decoded from the token.
 func connectWS(t *testing.T, ts *httptest.Server, token string) (*websocket.Conn, string) {
 	t.Helper()
-	conn, _, err := websocket.Dial(context.Background(), wsURL(ts, token), nil)
+	conn, _, err := websocket.Dial(context.Background(), wsURL(ts), &websocket.DialOptions{
+		HTTPHeader: http.Header{"Cookie": []string{"kiosk-token=" + token}},
+	})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -106,21 +108,22 @@ func TestRegisterSuccess(t *testing.T) {
 	}
 	defer res.Body.Close()
 
-	if res.StatusCode != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", res.StatusCode)
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", res.StatusCode)
 	}
 
-	var resp struct {
-		Token string `json:"token"`
+	var kioskCookie *http.Cookie
+	for _, c := range res.Cookies() {
+		if c.Name == "kiosk-token" {
+			kioskCookie = c
+			break
+		}
 	}
-	if err := json.NewDecoder(res.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if resp.Token == "" {
-		t.Fatal("expected non-empty token")
+	if kioskCookie == nil {
+		t.Fatal("expected kiosk-token cookie in response")
 	}
 
-	name, err := auth.New(testSecret).ValidateToken(resp.Token)
+	name, err := auth.New(testSecret).ValidateToken(kioskCookie.Value)
 	if err != nil {
 		t.Errorf("returned token failed validation: %v", err)
 	}
@@ -231,7 +234,9 @@ func TestListKiosksShowsConnected(t *testing.T) {
 func TestWSInvalidToken(t *testing.T) {
 	_, ts := setupTestServer(t)
 
-	_, _, err := websocket.Dial(context.Background(), wsURL(ts, "badtoken"), nil)
+	_, _, err := websocket.Dial(context.Background(), wsURL(ts), &websocket.DialOptions{
+		HTTPHeader: http.Header{"Cookie": []string{"kiosk-token=badtoken"}},
+	})
 	if err == nil {
 		t.Error("expected dial to fail with invalid token")
 	}
@@ -240,8 +245,7 @@ func TestWSInvalidToken(t *testing.T) {
 func TestWSMissingToken(t *testing.T) {
 	_, ts := setupTestServer(t)
 
-	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
-	_, _, err := websocket.Dial(context.Background(), url, nil)
+	_, _, err := websocket.Dial(context.Background(), wsURL(ts), nil)
 	if err == nil {
 		t.Error("expected dial to fail with missing token")
 	}
@@ -443,12 +447,22 @@ func TestRegisterThenConnect(t *testing.T) {
 	}
 	defer res.Body.Close()
 
-	var reg struct {
-		Token string `json:"token"`
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", res.StatusCode)
 	}
-	json.NewDecoder(res.Body).Decode(&reg)
 
-	_, name := connectWS(t, ts, reg.Token)
+	var kioskToken string
+	for _, c := range res.Cookies() {
+		if c.Name == "kiosk-token" {
+			kioskToken = c.Value
+			break
+		}
+	}
+	if kioskToken == "" {
+		t.Fatal("expected kiosk-token cookie")
+	}
+
+	_, name := connectWS(t, ts, kioskToken)
 	if name != "lobby" {
 		t.Errorf("expected name lobby from connected message, got %q", name)
 	}

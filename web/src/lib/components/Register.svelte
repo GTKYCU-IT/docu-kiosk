@@ -22,8 +22,6 @@
         toast.error("Registration failed. Please try again.");
         return;
       }
-      const { token } = await res.json();
-      localStorage.setItem("kiosk-token", token);
       location.reload();
     } catch {
       toast.error("Could not reach the server. Check your network connection.");

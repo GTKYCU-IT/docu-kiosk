@@ -7,9 +7,14 @@ import (
 	"github.com/coder/websocket"
 )
 
-// GET /ws?token=<token>
+// GET /ws
 func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
-	name, err := s.auth.ValidateToken(r.URL.Query().Get("token"))
+	cookie, err := r.Cookie("kiosk-token")
+	if err != nil {
+		http.Error(w, "invalid token", http.StatusUnauthorized)
+		return
+	}
+	name, err := s.auth.ValidateToken(cookie.Value)
 	if err != nil {
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return

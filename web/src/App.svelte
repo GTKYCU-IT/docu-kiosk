@@ -8,11 +8,9 @@
     (navigator as any).standalone === true ||
     window.matchMedia("(display-mode: standalone)").matches;
 
-  const token = localStorage.getItem("kiosk-token");
-
   type View = "install" | "register" | "validating" | "reconnecting" | "waiting" | "signing";
 
-  let view = $state<View>(!isStandalone ? "install" : token ? "validating" : "register");
+  let view = $state<View>(!isStandalone ? "install" : "validating");
 
   let kioskName = $state("");
   let signingUrl = $state("");
@@ -34,7 +32,7 @@
 
     function connect() {
       const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-      const ws = new WebSocket(`${protocol}//${location.host}/ws?token=${token}`);
+      const ws = new WebSocket(`${protocol}//${location.host}/ws`);
       let authenticated = false;
 
       ws.onerror = () => {};
@@ -44,7 +42,6 @@
           view = "reconnecting";
           reconnectTimer = window.setTimeout(connect, 3000);
         } else {
-          localStorage.removeItem("kiosk-token");
           view = "register";
         }
       };

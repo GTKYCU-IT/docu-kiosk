@@ -34,13 +34,15 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type Response struct {
-		Token string `json:"token"`
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(Response{Token: token})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "kiosk-token",
+		Value:    token,
+		Path:     "/",
+		MaxAge:   315360000, // 10 years
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // GET /api/kiosks

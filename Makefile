@@ -36,8 +36,8 @@ build: web server extension ## Build all components
 web: ## Build Vite frontend → web/dist/
 	cd web && npm run build
 
-server: web ## Build broker binary → ./server
-	go build -o server ./cmd/server
+server: web ## Build broker binary → tmp/server
+	go build -o tmp/server ./cmd/server
 
 extension: ## Build Chrome/Edge extension → extension/dist/
 	cd extension && npm run build
@@ -56,7 +56,6 @@ deploy-ext: ## Copy packed extension to server (set BROKER_HOST and optionally D
 		$(DEPLOY_USER)@$(BROKER_HOST):$(DEPLOY_PATH)
 
 clean: ## Remove build artifacts
-	rm -f server
 	rm -rf web/dist extension/dist tmp
 
 ## Docker
