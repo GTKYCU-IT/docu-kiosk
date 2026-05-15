@@ -2,7 +2,7 @@ import path from 'node:path'
 import { crx } from '@crxjs/vite-plugin'
 import tailwindcss from '@tailwindcss/vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import zip from 'vite-plugin-zip-pack'
 import manifest from './manifest.config.js'
 import { name, version } from './package.json'
@@ -26,5 +26,8 @@ export default defineConfig({
         /chrome-extension:\/\//,
       ],
     },
+  },
+  test: {
+    passWithNoTests: true,
   },
 })

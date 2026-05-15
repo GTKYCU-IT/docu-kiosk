@@ -2,31 +2,52 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/calvertjadon/docu-kiosk/internal/auth"
+	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
 	"github.com/coder/websocket"
+	"github.com/google/uuid"
+	"github.com/pressly/goose/v3"
+	_ "modernc.org/sqlite"
 )
 
-const (
-	testSecret = "test-token-secret"
-	testKey    = "test-registration-key"
-)
+func newTestDB(t *testing.T) *database.Queries {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
 
-// setupTestServer builds a server and an httptest.Server wired to its handlers.
-// The file server is excluded so tests run without web/dist.
+	_, file, _, _ := runtime.Caller(0)
+	migrationsDir := filepath.Join(filepath.Dir(file), "..", "..", "sql", "migrations")
+
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.Up(db, migrationsDir); err != nil {
+		t.Fatal(err)
+	}
+
+	return database.New(db)
+}
+
 func setupTestServer(t *testing.T) (*server, *httptest.Server) {
 	t.Helper()
 	s := &server{
-		auth:            auth.New(testSecret),
-		hub:             hub.New(),
-		registrationKey: testKey,
+		db:  newTestDB(t),
+		hub: hub.New(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/kiosks", s.handleRegister)
@@ -38,16 +59,6 @@ func setupTestServer(t *testing.T) (*server, *httptest.Server) {
 	return s, ts
 }
 
-func testToken(t *testing.T, name string) string {
-	t.Helper()
-	tok, err := auth.New(testSecret).GenerateToken(name)
-	if err != nil {
-		t.Fatalf("generate token: %v", err)
-	}
-	return tok
-}
-
-// waitFor polls condition until it returns true or 1 second elapses.
 func waitFor(t *testing.T, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
@@ -64,14 +75,25 @@ func wsURL(ts *httptest.Server) string {
 	return "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
 }
 
-// connectWS dials the WebSocket endpoint and reads the initial "connected"
-// message. By the time it returns, hub registration is complete and the
-// returned name is the one the server decoded from the token.
-func connectWS(t *testing.T, ts *httptest.Server, token string) (*websocket.Conn, string) {
+// registerKiosk POSTs to register a kiosk by name and expects 204.
+func registerKiosk(t *testing.T, ts *httptest.Server, name string) {
 	t.Helper()
-	conn, _, err := websocket.Dial(context.Background(), wsURL(ts), &websocket.DialOptions{
-		HTTPHeader: http.Header{"Cookie": []string{"kiosk-token=" + token}},
-	})
+	res, err := http.Post(ts.URL+"/api/kiosks", "application/json",
+		strings.NewReader(fmt.Sprintf(`{"name":%q}`, name)))
+	if err != nil {
+		t.Fatalf("register kiosk: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("register: expected 204, got %d", res.StatusCode)
+	}
+}
+
+// connectWS dials the WebSocket endpoint and reads the initial "connected" message.
+// The connecting IP must already be registered via registerKiosk.
+func connectWS(t *testing.T, ts *httptest.Server) (*websocket.Conn, string) {
+	t.Helper()
+	conn, _, err := websocket.Dial(context.Background(), wsURL(ts), nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -102,7 +124,7 @@ func TestRegisterSuccess(t *testing.T) {
 	_, ts := setupTestServer(t)
 
 	res, err := http.Post(ts.URL+"/api/kiosks", "application/json",
-		strings.NewReader(`{"name":"lobby","key":"test-registration-key"}`))
+		strings.NewReader(`{"name":"lobby"}`))
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -111,47 +133,13 @@ func TestRegisterSuccess(t *testing.T) {
 	if res.StatusCode != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", res.StatusCode)
 	}
-
-	var kioskCookie *http.Cookie
-	for _, c := range res.Cookies() {
-		if c.Name == "kiosk-token" {
-			kioskCookie = c
-			break
-		}
-	}
-	if kioskCookie == nil {
-		t.Fatal("expected kiosk-token cookie in response")
-	}
-
-	name, err := auth.New(testSecret).ValidateToken(kioskCookie.Value)
-	if err != nil {
-		t.Errorf("returned token failed validation: %v", err)
-	}
-	if name != "lobby" {
-		t.Errorf("token encodes wrong name: got %q, want %q", name, "lobby")
-	}
-}
-
-func TestRegisterWrongKey(t *testing.T) {
-	_, ts := setupTestServer(t)
-
-	res, err := http.Post(ts.URL+"/api/kiosks", "application/json",
-		strings.NewReader(`{"name":"lobby","key":"wrong"}`))
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", res.StatusCode)
-	}
 }
 
 func TestRegisterEmptyName(t *testing.T) {
 	_, ts := setupTestServer(t)
 
 	res, err := http.Post(ts.URL+"/api/kiosks", "application/json",
-		strings.NewReader(`{"name":"","key":"test-registration-key"}`))
+		strings.NewReader(`{"name":""}`))
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -203,7 +191,8 @@ func TestListKiosksEmpty(t *testing.T) {
 
 func TestListKiosksShowsConnected(t *testing.T) {
 	_, ts := setupTestServer(t)
-	connectWS(t, ts, testToken(t, "teller-1"))
+	registerKiosk(t, ts, "lobby")
+	connectWS(t, ts)
 
 	res, err := http.Get(ts.URL + "/api/kiosks")
 	if err != nil {
@@ -212,8 +201,8 @@ func TestListKiosksShowsConnected(t *testing.T) {
 	defer res.Body.Close()
 
 	var kiosks []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID   uuid.UUID `json:"id"`
+		Name string    `json:"name"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&kiosks); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -221,110 +210,85 @@ func TestListKiosksShowsConnected(t *testing.T) {
 	if len(kiosks) != 1 {
 		t.Fatalf("expected 1 kiosk, got %d", len(kiosks))
 	}
-	if kiosks[0].Name != "teller-1" {
-		t.Errorf("expected name teller-1, got %s", kiosks[0].Name)
+	if kiosks[0].Name != "lobby" {
+		t.Errorf("expected name lobby, got %s", kiosks[0].Name)
 	}
-	if kiosks[0].ID == "" {
-		t.Error("expected non-empty ID")
+	if kiosks[0].ID == uuid.Nil {
+		t.Error("expected non-nil ID")
 	}
 }
 
 // --- WebSocket ---
 
-func TestWSInvalidToken(t *testing.T) {
-	_, ts := setupTestServer(t)
-
-	_, _, err := websocket.Dial(context.Background(), wsURL(ts), &websocket.DialOptions{
-		HTTPHeader: http.Header{"Cookie": []string{"kiosk-token=badtoken"}},
-	})
-	if err == nil {
-		t.Error("expected dial to fail with invalid token")
-	}
-}
-
-func TestWSMissingToken(t *testing.T) {
+func TestWSUnregisteredIPRejected(t *testing.T) {
 	_, ts := setupTestServer(t)
 
 	_, _, err := websocket.Dial(context.Background(), wsURL(ts), nil)
 	if err == nil {
-		t.Error("expected dial to fail with missing token")
+		t.Error("expected dial to fail for unregistered IP")
 	}
 }
 
 func TestWSConnectedMessage(t *testing.T) {
 	_, ts := setupTestServer(t)
+	registerKiosk(t, ts, "lobby")
 
-	_, name := connectWS(t, ts, testToken(t, "lobby"))
+	_, name := connectWS(t, ts)
 	if name != "lobby" {
 		t.Errorf("expected name %q, got %q", "lobby", name)
 	}
 }
 
-func TestWSValidTokenConnects(t *testing.T) {
+func TestWSConnectsWhenRegistered(t *testing.T) {
 	s, ts := setupTestServer(t)
-	connectWS(t, ts, testToken(t, "lobby"))
+	registerKiosk(t, ts, "lobby")
+	connectWS(t, ts)
 
-	connected := s.hub.Connected()
-	if len(connected) != 1 || connected[0].Name != "lobby" {
-		t.Errorf("expected lobby in hub, got %v", connected)
+	if len(s.hub.Connected()) != 1 {
+		t.Errorf("expected 1 connected kiosk, got %v", s.hub.Connected())
 	}
 }
 
 func TestWSDisconnectRemovesFromHub(t *testing.T) {
 	s, ts := setupTestServer(t)
+	registerKiosk(t, ts, "lobby")
 
-	conn, _ := connectWS(t, ts, testToken(t, "lobby"))
+	conn, _ := connectWS(t, ts)
 	conn.CloseNow()
 
-	waitFor(t, func() bool {
-		for _, k := range s.hub.Connected() {
-			if k.Name == "lobby" {
-				return false
-			}
-		}
-		return true
-	})
+	waitFor(t, func() bool { return len(s.hub.Connected()) == 0 })
 }
 
-func TestWSReconnectCreatesFreshSession(t *testing.T) {
+func TestWSReconnect(t *testing.T) {
 	s, ts := setupTestServer(t)
-	token := testToken(t, "lobby")
+	registerKiosk(t, ts, "lobby")
 
-	conn1, _ := connectWS(t, ts, token)
-	id1 := s.hub.Connected()[0].ID
-
-	conn1.CloseNow()
+	conn, _ := connectWS(t, ts)
+	conn.CloseNow()
 	waitFor(t, func() bool { return len(s.hub.Connected()) == 0 })
 
-	connectWS(t, ts, token)
-	connected := s.hub.Connected()
-	if len(connected) != 1 {
-		t.Fatalf("expected 1 session after reconnect, got %d", len(connected))
-	}
-	if connected[0].ID == id1 {
-		t.Error("expected a new session ID after reconnect")
-	}
+	connectWS(t, ts)
+	waitFor(t, func() bool { return len(s.hub.Connected()) == 1 })
 }
 
 // --- Push ---
 
 func TestPushSuccess(t *testing.T) {
 	_, ts := setupTestServer(t)
-	conn, _ := connectWS(t, ts, testToken(t, "lobby"))
+	registerKiosk(t, ts, "lobby")
+	conn, _ := connectWS(t, ts)
 
-	id := ""
 	res, err := http.Get(ts.URL + "/api/kiosks")
 	if err != nil {
 		t.Fatalf("list kiosks: %v", err)
 	}
 	var kiosks []struct {
-		ID string `json:"id"`
+		ID uuid.UUID `json:"id"`
 	}
 	json.NewDecoder(res.Body).Decode(&kiosks)
 	res.Body.Close()
-	id = kiosks[0].ID
 
-	res, err = http.Post(ts.URL+"/api/kiosks/"+id+"/sessions", "application/json",
+	res, err = http.Post(ts.URL+"/api/kiosks/"+kiosks[0].ID.String()+"/sessions", "application/json",
 		strings.NewReader(`{"url":"https://example.docusign.net/sign/abc123"}`))
 	if err != nil {
 		t.Fatalf("push: %v", err)
@@ -353,10 +317,10 @@ func TestPushSuccess(t *testing.T) {
 	}
 }
 
-func TestPushKioskNotFound(t *testing.T) {
+func TestPushKioskNotConnected(t *testing.T) {
 	_, ts := setupTestServer(t)
 
-	res, err := http.Post(ts.URL+"/api/kiosks/00000000-0000-0000-0000-000000000000/sessions",
+	res, err := http.Post(ts.URL+"/api/kiosks/"+uuid.New().String()+"/sessions",
 		"application/json", strings.NewReader(`{"url":"https://example.docusign.net/sign/abc"}`))
 	if err != nil {
 		t.Fatalf("push: %v", err)
@@ -367,7 +331,7 @@ func TestPushKioskNotFound(t *testing.T) {
 	}
 }
 
-func TestPushInvalidUUID(t *testing.T) {
+func TestPushInvalidID(t *testing.T) {
 	_, ts := setupTestServer(t)
 
 	res, err := http.Post(ts.URL+"/api/kiosks/not-a-uuid/sessions",
@@ -383,21 +347,8 @@ func TestPushInvalidUUID(t *testing.T) {
 
 func TestPushMissingURL(t *testing.T) {
 	_, ts := setupTestServer(t)
-	connectWS(t, ts, testToken(t, "lobby"))
 
-	id := ""
-	res, err := http.Get(ts.URL + "/api/kiosks")
-	if err != nil {
-		t.Fatalf("list kiosks: %v", err)
-	}
-	var kiosks []struct {
-		ID string `json:"id"`
-	}
-	json.NewDecoder(res.Body).Decode(&kiosks)
-	res.Body.Close()
-	id = kiosks[0].ID
-
-	res, err = http.Post(ts.URL+"/api/kiosks/"+id+"/sessions",
+	res, err := http.Post(ts.URL+"/api/kiosks/"+uuid.New().String()+"/sessions",
 		"application/json", strings.NewReader(`{"url":""}`))
 	if err != nil {
 		t.Fatalf("push: %v", err)
@@ -410,21 +361,8 @@ func TestPushMissingURL(t *testing.T) {
 
 func TestPushBadJSON(t *testing.T) {
 	_, ts := setupTestServer(t)
-	connectWS(t, ts, testToken(t, "lobby"))
 
-	id := ""
-	res, err := http.Get(ts.URL + "/api/kiosks")
-	if err != nil {
-		t.Fatalf("list kiosks: %v", err)
-	}
-	var kiosks []struct {
-		ID string `json:"id"`
-	}
-	json.NewDecoder(res.Body).Decode(&kiosks)
-	res.Body.Close()
-	id = kiosks[0].ID
-
-	res, err = http.Post(ts.URL+"/api/kiosks/"+id+"/sessions",
+	res, err := http.Post(ts.URL+"/api/kiosks/"+uuid.New().String()+"/sessions",
 		"application/json", strings.NewReader("not json"))
 	if err != nil {
 		t.Fatalf("push: %v", err)
@@ -439,36 +377,15 @@ func TestPushBadJSON(t *testing.T) {
 
 func TestRegisterThenConnect(t *testing.T) {
 	s, ts := setupTestServer(t)
+	registerKiosk(t, ts, "lobby")
 
-	res, err := http.Post(ts.URL+"/api/kiosks", "application/json",
-		strings.NewReader(`{"name":"lobby","key":"test-registration-key"}`))
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d", res.StatusCode)
-	}
-
-	var kioskToken string
-	for _, c := range res.Cookies() {
-		if c.Name == "kiosk-token" {
-			kioskToken = c.Value
-			break
-		}
-	}
-	if kioskToken == "" {
-		t.Fatal("expected kiosk-token cookie")
-	}
-
-	_, name := connectWS(t, ts, kioskToken)
+	_, name := connectWS(t, ts)
 	if name != "lobby" {
 		t.Errorf("expected name lobby from connected message, got %q", name)
 	}
 
-	connected := s.hub.Connected()
-	if len(connected) != 1 || connected[0].Name != "lobby" {
-		t.Errorf("expected lobby in hub, got %v", connected)
+	if len(s.hub.Connected()) != 1 {
+		t.Errorf("expected 1 kiosk in hub, got %v", s.hub.Connected())
 	}
 }
+

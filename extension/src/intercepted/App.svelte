@@ -25,9 +25,8 @@
   let saved = $state(false)
 
   onMount(async () => {
-    const session = await chrome.storage.session.get('pendingSigningUrl') as { pendingSigningUrl?: string }
-
-    if (!session.pendingSigningUrl) {
+    const hash = window.location.hash
+    if (!hash.startsWith('#url=')) {
       const data = await chrome.storage.local.get('brokerUrl') as { brokerUrl?: string }
       optionsBrokerUrl = data.brokerUrl ?? ''
       view = 'options'
@@ -36,7 +35,7 @@
 
     const cfg = await getConfig()
     brokerUrl = cfg.brokerUrl ?? ''
-    pendingUrl = session.pendingSigningUrl
+    pendingUrl = hash.slice('#url='.length)
 
     if (!brokerUrl) {
       status = 'Broker URL not configured. Open extension options to set it.'
@@ -77,7 +76,6 @@
         body: JSON.stringify({ url: pendingUrl }),
       })
       if (!res.ok) throw new Error(`${res.status}`)
-      await chrome.storage.session.remove('pendingSigningUrl')
       window.close()
     } catch {
       status = `Failed to send to ${kiosk.name}.`

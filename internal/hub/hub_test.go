@@ -3,9 +3,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 
@@ -13,8 +13,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// newConnPair returns a connected server/client websocket pair. Both are
-// cleaned up automatically at the end of the test.
 func newConnPair(t *testing.T) (serverConn, clientConn *websocket.Conn) {
 	t.Helper()
 	ready := make(chan *websocket.Conn, 1)
@@ -40,21 +38,21 @@ func newConnPair(t *testing.T) (serverConn, clientConn *websocket.Conn) {
 	return serverConn, clientConn
 }
 
-func TestRegisterReturnsUUID(t *testing.T) {
+func TestRegisterReturnsID(t *testing.T) {
 	h := New()
-	id := h.Register("lobby", nil)
-	if id.String() == "" {
-		t.Error("expected non-empty UUID")
+	id := h.Register(uuid.New(), nil)
+	if id == (uuid.UUID{}) {
+		t.Error("expected non-zero id")
 	}
 }
 
 func TestRegisterTwiceCreatesTwoSessions(t *testing.T) {
 	h := New()
-	id1 := h.Register("lobby", nil)
-	id2 := h.Register("lobby", nil)
+	id1 := h.Register(uuid.New(), nil)
+	id2 := h.Register(uuid.New(), nil)
 
 	if id1 == id2 {
-		t.Error("each register call should produce a distinct UUID")
+		t.Error("each register call should produce a distinct ID")
 	}
 	if got := h.Connected(); len(got) != 2 {
 		t.Errorf("expected 2 sessions, got %d", len(got))
@@ -63,7 +61,7 @@ func TestRegisterTwiceCreatesTwoSessions(t *testing.T) {
 
 func TestUnregister(t *testing.T) {
 	h := New()
-	id := h.Register("lobby", nil)
+	id := h.Register(uuid.New(), nil)
 	h.Unregister(id)
 	if got := h.Connected(); len(got) != 0 {
 		t.Errorf("expected 0 connected after unregister, got %d", len(got))
@@ -84,29 +82,26 @@ func TestConnectedEmpty(t *testing.T) {
 
 func TestConnected(t *testing.T) {
 	h := New()
-	h.Register("lobby", nil)
-	h.Register("teller-1", nil)
+	a := uuid.New()
+	b := uuid.New()
+	h.Register(a, nil)
+	h.Register(b, nil)
 
 	connected := h.Connected()
 	if len(connected) != 2 {
 		t.Fatalf("expected 2 kiosks, got %d", len(connected))
 	}
-
-	names := map[string]bool{}
-	for _, k := range connected {
-		names[k.Name] = true
-	}
-	if !names["lobby"] || !names["teller-1"] {
-		t.Errorf("unexpected names in connected list: %v", connected)
+	if !slices.Contains(connected, a) || !slices.Contains(connected, b) {
+		t.Errorf("unexpected IDs in connected list: %v", connected)
 	}
 }
 
 func TestConnectedIncludesID(t *testing.T) {
 	h := New()
-	id := h.Register("lobby", nil)
+	id := h.Register(uuid.New(), nil)
 
 	connected := h.Connected()
-	if len(connected) != 1 || connected[0].ID != id {
+	if len(connected) != 1 || connected[0] != id {
 		t.Errorf("expected ID %v, got %v", id, connected)
 	}
 }
@@ -115,7 +110,7 @@ func TestSend(t *testing.T) {
 	serverConn, clientConn := newConnPair(t)
 
 	h := New()
-	id := h.Register("lobby", serverConn)
+	id := h.Register(uuid.New(), serverConn)
 
 	type Msg struct {
 		Type string `json:"type"`
@@ -151,15 +146,14 @@ func TestSendToUnconnected(t *testing.T) {
 func TestConcurrent(t *testing.T) {
 	h := New()
 	var wg sync.WaitGroup
-	for i := range 50 {
+	for range 50 {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
-			name := fmt.Sprintf("kiosk-%d", i)
-			id := h.Register(name, nil)
+			id := h.Register(uuid.New(), nil)
 			h.Connected()
 			h.Unregister(id)
-		}(i)
+		}()
 	}
 	wg.Wait()
 	if got := h.Connected(); len(got) != 0 {

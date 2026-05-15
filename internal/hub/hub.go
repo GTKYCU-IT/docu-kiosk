@@ -11,33 +11,22 @@ import (
 	"github.com/google/uuid"
 )
 
-type Kiosk struct {
-	ID   uuid.UUID
-	Name string
-}
-
-type session struct {
-	name string
-	conn *websocket.Conn
-}
-
 type Hub struct {
 	mu       sync.RWMutex
-	sessions map[uuid.UUID]session
+	sessions map[uuid.UUID]*websocket.Conn
 }
 
 func New() *Hub {
 	return &Hub{
-		sessions: make(map[uuid.UUID]session),
+		sessions: make(map[uuid.UUID]*websocket.Conn),
 	}
 }
 
-// Register adds a kiosk connection and returns its session UUID.
-func (h *Hub) Register(name string, conn *websocket.Conn) uuid.UUID {
-	id := uuid.New()
+// Register adds a kiosk connection keyed by its UUID.
+func (h *Hub) Register(id uuid.UUID, conn *websocket.Conn) uuid.UUID {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.sessions[id] = session{name: name, conn: conn}
+	h.sessions[id] = conn
 	return id
 }
 
@@ -54,22 +43,23 @@ func (h *Hub) Send(ctx context.Context, id uuid.UUID, msg any) error {
 	}
 
 	h.mu.RLock()
-	s, ok := h.sessions[id]
+	conn, ok := h.sessions[id]
 	h.mu.RUnlock()
 
 	if !ok {
 		return fmt.Errorf("kiosk %s not connected", id)
 	}
 
-	return s.conn.Write(ctx, websocket.MessageText, data)
+	return conn.Write(ctx, websocket.MessageText, data)
 }
 
-func (h *Hub) Connected() []Kiosk {
+// Connected returns the UUIDs of all connected kiosks.
+func (h *Hub) Connected() []uuid.UUID {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	kiosks := make([]Kiosk, 0, len(h.sessions))
-	for id, s := range h.sessions {
-		kiosks = append(kiosks, Kiosk{ID: id, Name: s.name})
+	ids := make([]uuid.UUID, 0, len(h.sessions))
+	for id := range h.sessions {
+		ids = append(ids, id)
 	}
-	return kiosks
+	return ids
 }

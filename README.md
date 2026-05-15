@@ -40,17 +40,21 @@ make extension  # Extension → extension/dist/
 make clean      # remove build artifacts
 ```
 
-Load `extension/dist/` as an unpacked extension at `edge://extensions` → "Load unpacked" to manually test the extension.
+Load `extension/dist/` as an unpacked extension at `edge://extensions` → "Load unpacked" to test the extension locally. The extension uses `declarativeNetRequest` (no enterprise policy required) so load-unpacked works for all core functionality.
 
 ## Configuration
 
-### Broker environment variables
+### Broker
 
-| Variable | Required | Description |
-|---|---|---|
-| `DOCU_KIOSK_TOKEN_SECRET` | Yes | Secret used to sign kiosk authentication tokens |
-| `DOCU_KIOSK_REGISTRATION_KEY` | Yes | Key required to register a new kiosk |
-| `BROKER_HOST` | Yes | Hostname Caddy will serve and issue a TLS certificate for |
+The broker requires no environment variables. Kiosk registrations are persisted in `kiosks.db` (SQLite). Authentication is IP-based — no secrets or registration keys needed.
+
+The only required configuration is for Caddy:
+
+| Variable | Description |
+|---|---|
+| `BROKER_HOST` | Hostname Caddy will serve and issue a TLS certificate for |
+
+Set this in the `.env` file on the server (see the [DevOps wiki](../../wiki/DevOps)).
 
 ### Extension
 

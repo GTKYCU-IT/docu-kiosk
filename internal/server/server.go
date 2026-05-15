@@ -1,4 +1,4 @@
-// Package server wires together auth, hub, routes, and HTTP lifecycle.
+// Package server wires together the database, hub, routes, and HTTP lifecycle.
 package server
 
 import (
@@ -10,24 +10,30 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/calvertjadon/docu-kiosk/internal/auth"
+	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
+	"github.com/google/uuid"
 )
 
-type server struct {
-	auth            *auth.Auth
-	hub             *hub.Hub
-	registrationKey string
-	httpServer      *http.Server
-	port            int
+// kioskDB is the subset of *database.Queries the server needs.
+type kioskDB interface {
+	CreateKiosk(context.Context, database.CreateKioskParams) (database.Kiosk, error)
+	GetKioskByIP(context.Context, string) (database.Kiosk, error)
+	GetKioskByID(context.Context, uuid.UUID) (database.Kiosk, error)
 }
 
-func NewServer(port int, tokenSecret, registrationKey string) (server, error) {
+type server struct {
+	db         kioskDB
+	hub        *hub.Hub
+	httpServer *http.Server
+	port       int
+}
+
+func NewServer(port int, db *database.Queries) (server, error) {
 	s := server{
-		auth:            auth.New(tokenSecret),
-		hub:             hub.New(),
-		registrationKey: registrationKey,
-		port:            port,
+		db:   db,
+		hub:  hub.New(),
+		port: port,
 	}
 
 	mux := http.NewServeMux()
@@ -40,10 +46,26 @@ func NewServer(port int, tokenSecret, registrationKey string) (server, error) {
 
 	s.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
-		Handler: mux,
+		Handler: corsMiddleware(mux),
 	}
 
 	return s, nil
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *server) Start() error {
@@ -66,3 +88,4 @@ func (s *server) Start() error {
 
 	return nil
 }
+

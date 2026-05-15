@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 
 	"github.com/coder/websocket"
@@ -9,14 +10,15 @@ import (
 
 // GET /ws
 func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie("kiosk-token")
+	kioskIP, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		http.Error(w, "invalid token", http.StatusUnauthorized)
+		http.Error(w, "could not get kiosk ip", http.StatusInternalServerError)
 		return
 	}
-	name, err := s.auth.ValidateToken(cookie.Value)
+
+	k, err := s.db.GetKioskByIP(r.Context(), kioskIP)
 	if err != nil {
-		http.Error(w, "invalid token", http.StatusUnauthorized)
+		http.Error(w, "unregistered ip", http.StatusUnauthorized)
 		return
 	}
 
@@ -30,12 +32,12 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.CloseNow()
 
-	id := s.hub.Register(name, conn)
-	defer s.hub.Unregister(id)
+	s.hub.Register(k.ID, conn)
+	defer s.hub.Unregister(k.ID)
 
 	ctx := r.Context()
 
-	data, _ := json.Marshal(map[string]string{"type": "connected", "name": name})
+	data, _ := json.Marshal(map[string]string{"type": "connected", "name": k.Name})
 	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
 		return
 	}
