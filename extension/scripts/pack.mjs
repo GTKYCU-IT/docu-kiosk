@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process'
-import { existsSync, renameSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, renameSync, chmodSync, readFileSync, writeFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
@@ -26,7 +26,9 @@ execFileSync(chromeBin, [
   `--pack-extension-key=${join(root, 'dist.pem')}`,
 ], { stdio: 'inherit' })
 
-renameSync(join(root, 'dist.crx'), join(root, 'public', 'docu-kiosk.crx'))
+const crxDest = join(root, 'public', 'docu-kiosk.crx')
+renameSync(join(root, 'dist.crx'), crxDest)
+chmodSync(crxDest, 0o644)
 console.log('Moved dist.crx → public/docu-kiosk.crx')
 
 writeFileSync(join(root, 'public', 'update.xml'),
