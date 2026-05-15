@@ -1,17 +1,31 @@
 package main
 
 import (
+	"database/sql"
 	"log"
-	"os"
 
+	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/server"
+	"github.com/pressly/goose/v3"
+	_ "modernc.org/sqlite"
 )
 
 func main() {
-	tokenSecret := mustEnv("DOCU_KIOSK_TOKEN_SECRET")
-	registrationKey := mustEnv("DOCU_KIOSK_REGISTRATION_KEY")
+	db, err := sql.Open("sqlite", "kiosks.db")
+	if err != nil {
+		log.Fatalf("open db: %s", err)
+	}
+	defer db.Close()
 
-	srv, err := server.NewServer(8080, tokenSecret, registrationKey)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		log.Fatalf("goose dialect: %s", err)
+	}
+	if err := goose.Up(db, "./sql/migrations"); err != nil {
+		log.Fatalf("run migrations: %s", err)
+	}
+
+	srv, err := server.NewServer(8080, database.New(db))
 	if err != nil {
 		log.Fatalf("error creating server: %s", err)
 	}
@@ -19,12 +33,4 @@ func main() {
 	if err := srv.Start(); err != nil {
 		log.Fatalf("error stopping server: %s", err)
 	}
-}
-
-func mustEnv(key string) string {
-	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		log.Fatalf("required environment variable %s is not set", key)
-	}
-	return v
 }

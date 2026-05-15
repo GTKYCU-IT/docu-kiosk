@@ -6,7 +6,6 @@
   import { toast } from "svelte-sonner";
 
   let name = $state("");
-  let key = $state("");
   let loading = $state(false);
 
   async function register(e: SubmitEvent) {
@@ -16,7 +15,7 @@
       const res = await fetch("/api/kiosks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, key }),
+        body: JSON.stringify({ name }),
       });
       if (!res.ok) {
         toast.error("Registration failed. Please try again.");
@@ -52,11 +51,6 @@
               placeholder="e.g. Branch Office Kiosk 1"
               required
             />
-          </Field>
-
-          <Field>
-            <FieldLabel for="key-{id}">Secret Key</FieldLabel>
-            <Input id="key-{id}" bind:value={key} required />
           </Field>
 
           <Field>

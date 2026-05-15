@@ -1,7 +1,7 @@
 import { defineManifest } from '@crxjs/vite-plugin'
 import pkg from './package.json'
 
-export default defineManifest({
+export default defineManifest((config) => ({
   manifest_version: 3,
   name: pkg.name,
   version: pkg.version,
@@ -18,15 +18,15 @@ export default defineManifest({
   },
 
   permissions: [
-    'webRequest',
-    'webRequestBlocking',
+    'declarativeNetRequest',
     'storage',
   ],
 
   host_permissions: [
     'https://*.docusign.net/*',
     'https://*.docusign.com/*',
-    'https://*.local/*'
+    'https://*.local/*',
+    ...(config.mode === 'development' ? ['http://localhost/*'] : []),
   ],
 
   background: {
@@ -35,10 +35,4 @@ export default defineManifest({
 
   options_page: 'src/intercepted/index.html',
 
-  web_accessible_resources: [
-    {
-      resources: ['src/intercepted/index.html'],
-      matches: ['https://*.docusign.net/*', 'https://*.docusign.com/*'],
-    },
-  ],
-})
+}))

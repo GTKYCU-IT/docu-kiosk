@@ -3,7 +3,10 @@
         test test-race vet \
         docker-build docker-up docker-down \
         cert-export \
+        migrate migrate-down migrate-status migrate-create sqlc-gen tools \
         help
+
+DB_PATH ?= ./kiosks.db
 
 all: build
 
@@ -74,6 +77,28 @@ CERT_FILE ?= docu-kiosk-ca.crt
 cert-export: ## Export Caddy's root CA cert for distribution (→ docu-kiosk-ca.crt)
 	docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt > $(CERT_FILE)
 	@echo "Exported to $(CERT_FILE) — distribute to MSR workstations and kiosk tablets"
+
+## Database
+migrate: ## Apply pending migrations
+	goose -dir sql/migrations sqlite3 $(DB_PATH) up
+
+migrate-down: ## Roll back last migration
+	goose -dir sql/migrations sqlite3 $(DB_PATH) down
+
+migrate-status: ## Show migration status
+	goose -dir sql/migrations sqlite3 $(DB_PATH) status
+
+migrate-create: ## Create a new migration file (NAME=<name>)
+	@test -n "$(NAME)" || (echo "Error: NAME is not set"; exit 1)
+	goose -dir sql/migrations create $(NAME) sql
+
+sqlc-gen: ## Regenerate internal/database from SQL
+	sqlc generate
+
+## Tools
+tools: ## Install dev tools (sqlc, goose)
+	go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
+	go install github.com/pressly/goose/v3/cmd/goose@latest
 
 ## Help
 help: ## Show available targets

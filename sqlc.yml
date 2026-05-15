@@ -1,0 +1,17 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    queries: "sql/queries"
+    schema: "sql/migrations"
+    gen:
+      go:
+        package: "database"
+        out: "internal/database"
+        rename:
+          id: ID
+          ip: IP
+        overrides:
+          - column: "kiosks.id"
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"

@@ -2,14 +2,17 @@ package server
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
+
+	"github.com/calvertjadon/docu-kiosk/internal/database"
+	"github.com/google/uuid"
 )
 
 // POST /api/kiosks
 func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	type Params struct {
-		Name            string `json:"name"`
-		RegistrationKey string `json:"key"`
+		Name string `json:"name"`
 	}
 
 	var params Params
@@ -18,46 +21,46 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if params.RegistrationKey != s.registrationKey {
-		http.Error(w, "invalid registration key", http.StatusUnauthorized)
-		return
-	}
-
 	if params.Name == "" {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
 
-	token, err := s.auth.GenerateToken(params.Name)
+	kioskIP, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		http.Error(w, "failed to generate token", http.StatusInternalServerError)
+		http.Error(w, "failed to get kiosk ip", http.StatusInternalServerError)
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "kiosk-token",
-		Value:    token,
-		Path:     "/",
-		MaxAge:   315360000, // 10 years
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+	_, err = s.db.CreateKiosk(r.Context(), database.CreateKioskParams{
+		ID:   uuid.New(),
+		IP:   kioskIP,
+		Name: params.Name,
 	})
+	if err != nil {
+		http.Error(w, "failed to create kiosk", http.StatusInternalServerError)
+		return
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // GET /api/kiosks
 func (s *server) handleListKiosks(w http.ResponseWriter, r *http.Request) {
 	type KioskResponse struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID   uuid.UUID `json:"id"`
+		Name string    `json:"name"`
 	}
 
 	connected := s.hub.Connected()
-	resp := make([]KioskResponse, len(connected))
-	for i, k := range connected {
-		resp[i] = KioskResponse{ID: k.ID.String(), Name: k.Name}
+	kiosks := make([]KioskResponse, 0, len(connected))
+	for _, id := range connected {
+		k, err := s.db.GetKioskByID(r.Context(), id)
+		if err == nil {
+			kiosks = append(kiosks, KioskResponse{ID: k.ID, Name: k.Name})
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(kiosks)
 }
