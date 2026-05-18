@@ -12,6 +12,7 @@ import (
 
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
+	sentryhttp "github.com/getsentry/sentry-go/http"
 	"github.com/google/uuid"
 )
 
@@ -44,9 +45,10 @@ func NewServer(port int, db *database.Queries) (server, error) {
 	mux.Handle("/extension/", extensionFileServer())
 	mux.Handle("/", http.FileServer(http.Dir("./web/dist")))
 
+	sentryHandler := sentryhttp.New(sentryhttp.Options{Repanic: true})
 	s.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
-		Handler: corsMiddleware(mux),
+		Handler: sentryHandler.Handle(corsMiddleware(mux)),
 	}
 
 	return s, nil

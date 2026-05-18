@@ -3,14 +3,24 @@ package main
 import (
 	"database/sql"
 	"log"
+	"os"
+	"time"
 
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/server"
+	sentry "github.com/getsentry/sentry-go"
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
 func main() {
+	if err := sentry.Init(sentry.ClientOptions{
+		Dsn: os.Getenv("SENTRY_DSN"),
+	}); err != nil {
+		log.Printf("sentry init: %s", err)
+	}
+	defer sentry.Flush(2 * time.Second)
+
 	db, err := sql.Open("sqlite", "kiosks.db")
 	if err != nil {
 		log.Fatalf("open db: %s", err)

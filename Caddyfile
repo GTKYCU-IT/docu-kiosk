@@ -15,3 +15,8 @@
 
 	reverse_proxy app:8080
 }
+
+{$GLITCHTIP_HOST} {
+	tls internal
+	reverse_proxy glitchtip:8000
+}
