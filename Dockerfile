@@ -19,6 +19,7 @@ WORKDIR /app
 COPY --from=backend /build/server .
 COPY --from=frontend /build/dist ./web/dist
 COPY extension/public/ ./extension/public/
+COPY sql/migrations/ ./sql/migrations/
 USER app
 EXPOSE 8080
 CMD ["./server"]
