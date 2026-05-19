@@ -21,7 +21,7 @@ func main() {
 	}
 	defer sentry.Flush(2 * time.Second)
 
-	db, err := sql.Open("sqlite", "kiosks.db")
+	db, err := sql.Open("sqlite", "./data/kiosks.db")
 	if err != nil {
 		log.Fatalf("open db: %s", err)
 	}

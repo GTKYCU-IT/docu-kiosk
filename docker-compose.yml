@@ -12,6 +12,8 @@ services:
     image: ghcr.io/gtkycu-it/docu-kiosk:latest
     env_file: .env
     restart: unless-stopped
+    volumes:
+      - app-data:/app/data
 
   caddy:
     image: caddy:2-alpine
@@ -53,6 +55,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  app-data:
   caddy-data:
   caddy-config:
   glitchtip-pg:
