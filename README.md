@@ -1,7 +1,6 @@
 # docu-kiosk
 
 [![CI](https://github.com/GTKYCU-IT/docu-kiosk/actions/workflows/ci.yml/badge.svg)](https://github.com/GTKYCU-IT/docu-kiosk/actions/workflows/ci.yml)
-[![Deploy](https://github.com/GTKYCU-IT/docu-kiosk/actions/workflows/deploy.yml/badge.svg)](https://github.com/GTKYCU-IT/docu-kiosk/actions/workflows/deploy.yml)
 [![Release](https://github.com/GTKYCU-IT/docu-kiosk/actions/workflows/release.yml/badge.svg)](https://github.com/GTKYCU-IT/docu-kiosk/actions/workflows/release.yml)
 [![GitHub release](https://img.shields.io/github/v/release/GTKYCU-IT/docu-kiosk)](https://github.com/GTKYCU-IT/docu-kiosk/releases/latest)
 
@@ -48,13 +47,7 @@ Load `extension/dist/` as an unpacked extension at `edge://extensions` → "Load
 
 The broker requires no environment variables. Kiosk registrations are persisted in `kiosks.db` (SQLite). Authentication is IP-based — no secrets or registration keys needed.
 
-The only required configuration is for Caddy:
-
-| Variable | Description |
-|---|---|
-| `BROKER_HOST` | Hostname Caddy will serve and issue a TLS certificate for |
-
-Set this in the `.env` file on the server (see the [DevOps wiki](../../wiki/DevOps)).
+Caddy runs independently on the server as a reverse proxy in front of the broker. See the [DevOps wiki](../../wiki/DevOps) for server configuration.
 
 ### Extension
 

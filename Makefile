@@ -1,8 +1,8 @@
-.PHONY: all build web server extension pack deploy-ext clean \
+.PHONY: all build web server extension clean \
         dev dev-web dev-broker run \
         test test-race vet \
         docker-build docker-up docker-down \
-        cert-export \
+        release \
         migrate migrate-down migrate-status migrate-create sqlc-gen tools \
         help
 
@@ -45,21 +45,18 @@ server: web ## Build broker binary → tmp/server
 extension: ## Build Chrome/Edge extension → extension/dist/
 	cd extension && npm run build
 
-DEPLOY_USER ?= gtky
-DEPLOY_PATH ?= ~/docu-kiosk/extension/public/
-
-pack: ## Sign, pack, and deploy extension (dev machine only — requires Edge + dist.pem; set BROKER_HOST)
-	$(eval export $(shell grep '^BROKER_HOST' .env 2>/dev/null || true))
-	cd extension && npm run pack
-	$(MAKE) deploy-ext
-
-deploy-ext: ## Copy packed extension to server (set BROKER_HOST and optionally DEPLOY_USER/DEPLOY_PATH)
-	@test -n "$(BROKER_HOST)" || (echo "Error: BROKER_HOST is not set"; exit 1)
-	scp extension/public/docu-kiosk.crx extension/public/update.xml \
-		$(DEPLOY_USER)@$(BROKER_HOST):$(DEPLOY_PATH)
-
 clean: ## Remove build artifacts
 	rm -rf web/dist extension/dist tmp
+
+## Release
+release: ## Cut a release — bumps extension version, tags, and pushes (VERSION=x.y.z)
+	@test -n "$(VERSION)" || (echo "Error: VERSION is not set. Usage: make release VERSION=x.y.z"; exit 1)
+	@test -z "$$(git status --porcelain)" || (echo "Error: working tree is dirty"; exit 1)
+	cd extension && npm version $(VERSION) --no-git-tag-version
+	git add extension/package.json extension/package-lock.json
+	git commit -m "chore: bump to $(VERSION)"
+	git tag v$(VERSION)
+	git push origin main v$(VERSION)
 
 ## Docker
 docker-build: ## Build Docker image
@@ -70,13 +67,6 @@ docker-up: ## Start stack in the background
 
 docker-down: ## Stop stack
 	docker compose down
-
-## Certificates
-CERT_FILE ?= docu-kiosk-ca.crt
-
-cert-export: ## Export Caddy's root CA cert for distribution (→ docu-kiosk-ca.crt)
-	docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt > $(CERT_FILE)
-	@echo "Exported to $(CERT_FILE) — distribute to MSR workstations and kiosk tablets"
 
 ## Database
 migrate: ## Apply pending migrations
