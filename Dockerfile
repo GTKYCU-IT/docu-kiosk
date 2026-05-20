@@ -18,7 +18,6 @@ RUN addgroup -S app && adduser -S -G app app
 WORKDIR /app
 COPY --from=backend /build/server .
 COPY --from=frontend /build/dist ./web/dist
-COPY extension/public/ ./extension/public/
 COPY sql/migrations/ ./sql/migrations/
 RUN mkdir /app/data && chown app:app /app/data
 USER app

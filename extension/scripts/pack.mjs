@@ -7,12 +7,13 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const { version } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 
 const EXTENSION_ID = 'ndmpfjhihnpgakamhhdcpjemakdgmkcp'
-const brokerHost = process.env.BROKER_HOST
-if (!brokerHost) {
-  console.error('BROKER_HOST environment variable is required')
+const serverUrl = process.env.GITHUB_SERVER_URL
+const repository = process.env.GITHUB_REPOSITORY
+if (!serverUrl || !repository) {
+  console.error('GITHUB_SERVER_URL and GITHUB_REPOSITORY environment variables are required')
   process.exit(1)
 }
-const CODEBASE_URL = `https://${brokerHost}/extension/docu-kiosk.crx`
+const CODEBASE_URL = `${serverUrl}/${repository}/releases/latest/download/docu-kiosk.crx`
 
 const chromeCandidates = [
   '/usr/bin/google-chrome',

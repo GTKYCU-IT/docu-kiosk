@@ -1,62 +1,10 @@
-x-glitchtip-env: &glitchtip-env
-  DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres
-  VALKEY_URL: redis://valkey:6379
-  SECRET_KEY: ${GLITCHTIP_SECRET_KEY}
-  EMAIL_URL: ${GLITCHTIP_EMAIL_URL:-consolemail://}
-  GLITCHTIP_DOMAIN: https://${GLITCHTIP_HOST}
-  DEFAULT_FROM_EMAIL: ${GLITCHTIP_FROM_EMAIL:-noreply@example.com}
-  ENABLE_USER_REGISTRATION: "False"
-
 services:
-  app:
+  docu-kiosk:
     image: ghcr.io/gtkycu-it/docu-kiosk:latest
     env_file: .env
     restart: unless-stopped
     volumes:
       - app-data:/app/data
 
-  caddy:
-    image: caddy:2-alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
-    env_file: .env
-    restart: unless-stopped
-    depends_on:
-      - app
-      - glitchtip
-
-  postgres:
-    image: postgres:18
-    environment:
-      POSTGRES_HOST_AUTH_METHOD: trust
-    volumes:
-      - glitchtip-pg:/var/lib/postgresql
-    restart: unless-stopped
-
-  valkey:
-    image: valkey/valkey:9
-    restart: unless-stopped
-
-  glitchtip:
-    image: glitchtip/glitchtip:6
-    depends_on:
-      - postgres
-      - valkey
-    environment:
-      <<: *glitchtip-env
-      SERVER_ROLE: all_in_one
-    volumes:
-      - glitchtip-uploads:/code/uploads
-    restart: unless-stopped
-
 volumes:
   app-data:
-  caddy-data:
-  caddy-config:
-  glitchtip-pg:
-  glitchtip-uploads:

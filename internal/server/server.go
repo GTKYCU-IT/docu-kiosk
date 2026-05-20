@@ -42,7 +42,6 @@ func NewServer(port int, db *database.Queries) (server, error) {
 	mux.HandleFunc("GET /api/kiosks", s.handleListKiosks)
 	mux.HandleFunc("POST /api/kiosks/{id}/sessions", s.handlePush)
 	mux.HandleFunc("/ws", s.handleWS)
-	mux.Handle("/extension/", extensionFileServer())
 	mux.Handle("/", http.FileServer(http.Dir("./web/dist")))
 
 	sentryHandler := sentryhttp.New(sentryhttp.Options{Repanic: true})
