@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"net"
 	"net/http"
 
 	"github.com/coder/websocket"
@@ -10,11 +9,7 @@ import (
 
 // GET /ws
 func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
-	kioskIP, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		http.Error(w, "could not get kiosk ip", http.StatusInternalServerError)
-		return
-	}
+	kioskIP := realIP(r)
 
 	k, err := s.db.GetKioskByIP(r.Context(), kioskIP)
 	if err != nil {
