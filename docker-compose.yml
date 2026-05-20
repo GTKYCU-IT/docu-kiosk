@@ -5,6 +5,12 @@ services:
     restart: unless-stopped
     volumes:
       - app-data:/app/data
+    networks:
+      - caddy
 
 volumes:
   app-data:
+
+networks:
+  caddy:
+    external: true
