@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
+
 func realIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if i := strings.Index(xff, ","); i != -1 {
@@ -46,10 +47,12 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Name: params.Name,
 	})
 	if err != nil {
+		s.logger.Error("create kiosk", "error", err, "name", params.Name, "ip", kioskIP)
 		http.Error(w, "failed to create kiosk", http.StatusInternalServerError)
 		return
 	}
 
+	s.logger.Info("kiosk registered", "name", params.Name, "ip", kioskIP)
 	w.WriteHeader(http.StatusNoContent)
 }
 

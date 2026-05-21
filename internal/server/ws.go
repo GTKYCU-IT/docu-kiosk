@@ -13,6 +13,7 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	k, err := s.db.GetKioskByIP(r.Context(), kioskIP)
 	if err != nil {
+		s.logger.Warn("ws connect rejected: unregistered ip", "ip", kioskIP)
 		http.Error(w, "unregistered ip", http.StatusUnauthorized)
 		return
 	}
@@ -23,12 +24,17 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
+		s.logger.Error("ws accept", "error", err, "kiosk_id", k.ID, "ip", kioskIP)
 		return
 	}
 	defer conn.CloseNow()
 
 	s.hub.Register(k.ID, conn)
-	defer s.hub.Unregister(k.ID)
+	s.logger.Info("kiosk connected", "kiosk_id", k.ID, "name", k.Name, "ip", kioskIP)
+	defer func() {
+		s.hub.Unregister(k.ID)
+		s.logger.Info("kiosk disconnected", "kiosk_id", k.ID, "name", k.Name)
+	}()
 
 	ctx := r.Context()
 

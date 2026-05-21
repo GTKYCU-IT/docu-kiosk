@@ -46,8 +46,9 @@ func newTestDB(t *testing.T) *database.Queries {
 func setupTestServer(t *testing.T) (*server, *httptest.Server) {
 	t.Helper()
 	s := &server{
-		db:  newTestDB(t),
-		hub: hub.New(),
+		db:     newTestDB(t),
+		hub:    hub.New(),
+		logger: newLogger(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/kiosks", s.handleRegister)
