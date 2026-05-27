@@ -20,7 +20,6 @@ export default defineManifest((config) => ({
   permissions: [
     'declarativeNetRequest',
     'storage',
-    'webNavigation',
   ],
 
   host_permissions: [
@@ -35,5 +34,14 @@ export default defineManifest((config) => ({
   },
 
   options_page: 'src/intercepted/index.html',
+
+  web_accessible_resources: [{
+    resources: [
+      'src/intercepted/index.html',
+      'assets/*',
+      'public/*',
+    ],
+    matches: ['<all_urls>'],
+  }],
 
 }))
