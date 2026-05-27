@@ -20,6 +20,7 @@ export default defineManifest((config) => ({
   permissions: [
     'declarativeNetRequest',
     'storage',
+    'webNavigation',
   ],
 
   host_permissions: [
