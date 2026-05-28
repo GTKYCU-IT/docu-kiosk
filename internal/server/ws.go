@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -36,12 +38,32 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.logger.Info("kiosk disconnected", "kiosk_id", k.ID, "name", k.Name)
 	}()
 
-	ctx := r.Context()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
 
 	data, _ := json.Marshal(map[string]string{"type": "connected", "name": k.Name})
 	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
 		return
 	}
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
+				err := conn.Ping(pingCtx)
+				pingCancel()
+				if err != nil {
+					cancel()
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	for {
 		if _, _, err := conn.Read(ctx); err != nil {
