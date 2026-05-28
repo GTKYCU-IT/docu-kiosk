@@ -10,11 +10,10 @@ import (
 	"github.com/google/uuid"
 )
 
-
 func realIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.Index(xff, ","); i != -1 {
-			return strings.TrimSpace(xff[:i])
+		if before, _, found := strings.Cut(xff, ","); found {
+			return strings.TrimSpace(before)
 		}
 		return strings.TrimSpace(xff)
 	}
