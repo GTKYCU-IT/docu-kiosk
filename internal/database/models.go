@@ -13,3 +13,9 @@ type Kiosk struct {
 	IP   string
 	Name string
 }
+
+type User struct {
+	ID       string
+	Username string
+	Password string
+}

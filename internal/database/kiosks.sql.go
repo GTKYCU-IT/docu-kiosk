@@ -37,7 +37,10 @@ func (q *Queries) CreateKiosk(ctx context.Context, arg CreateKioskParams) (Kiosk
 }
 
 const getKioskByID = `-- name: GetKioskByID :one
-SELECT id, ip, name
+SELECT
+    id,
+    ip,
+    name
 FROM kiosks
 WHERE id = ?
 `
@@ -50,7 +53,10 @@ func (q *Queries) GetKioskByID(ctx context.Context, id uuid.UUID) (Kiosk, error)
 }
 
 const getKioskByIP = `-- name: GetKioskByIP :one
-SELECT id, ip, name
+SELECT
+    id,
+    ip,
+    name
 FROM kiosks
 WHERE ip = ?
 `
