@@ -15,3 +15,21 @@ sql:
             go_type:
               import: "github.com/google/uuid"
               type: "UUID"
+          - column: "users.id"
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+          - column: "refresh_tokens.created_at"
+            nullable: false
+            go_type: "time.Time"
+          - column: "refresh_tokens.updated_at"
+            nullable: false
+            go_type: "time.Time"
+          - column: "refresh_tokens.expires_at"
+            nullable: false
+            go_type: "time.Time"
+          - column: "refresh_tokens.revoked_at"
+            nullable: true
+            go_type:
+              type: "time.Time"
+              pointer: true

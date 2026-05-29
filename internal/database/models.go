@@ -5,6 +5,8 @@
 package database
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 )
 
@@ -14,8 +16,17 @@ type Kiosk struct {
 	Name string
 }
 
+type RefreshToken struct {
+	Token     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	UserID    string
+	ExpiresAt time.Time
+	RevokedAt *time.Time
+}
+
 type User struct {
-	ID       string
+	ID       uuid.UUID
 	Username string
 	Password string
 }

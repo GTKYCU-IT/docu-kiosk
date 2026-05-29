@@ -7,7 +7,6 @@ import (
 
 	"github.com/calvertjadon/docu-kiosk/internal/auth"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
-	"github.com/google/uuid"
 )
 
 type AuthenticatedHandler func(w http.ResponseWriter, r *http.Request, user database.User)
@@ -26,7 +25,7 @@ func (s *server) ensureAuthMiddlware(handler AuthenticatedHandler) http.HandlerF
 			return
 		}
 
-		user, err := s.db.GetUser(r.Context(), userID.String())
+		user, err := s.db.GetUser(r.Context(), userID)
 		if err != nil {
 			respondWithError(w, "invalid token", http.StatusUnauthorized, err)
 			return
@@ -63,12 +62,7 @@ func (s *server) handleAuthenticate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, err := uuid.Parse(user.ID)
-	if err != nil {
-		respondWithError(w, "Database error", http.StatusInternalServerError, err)
-	}
-
-	tokenString, err := auth.GenerateJWT(userID, s.jwtKey, time.Minute*5)
+	tokenString, err := auth.GenerateJWT(user.ID, s.jwtKey, time.Minute*5)
 	if err != nil {
 		respondWithError(w, "Token creation failed", http.StatusInternalServerError, err)
 	}
