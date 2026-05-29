@@ -15,22 +15,15 @@ import (
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
 	"github.com/felixge/httpsnoop"
-	"github.com/google/uuid"
 )
 
-// kioskDB is the subset of *database.Queries the server needs.
-type kioskDB interface {
-	CreateKiosk(context.Context, database.CreateKioskParams) (database.Kiosk, error)
-	GetKioskByIP(context.Context, string) (database.Kiosk, error)
-	GetKioskByID(context.Context, uuid.UUID) (database.Kiosk, error)
-}
-
 type server struct {
-	db         kioskDB
+	db         *database.Queries
 	hub        *hub.Hub
 	httpServer *http.Server
 	logger     *slog.Logger
 	port       int
+	jwtKey     []byte
 }
 
 func newLogger() *slog.Logger {
@@ -50,10 +43,13 @@ func NewServer(port int, db *database.Queries) (server, error) {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /protected", s.ensureAuthMiddlware(s.handleProtected))
+
 	mux.HandleFunc("POST /api/kiosks", s.handleRegister)
 	mux.HandleFunc("GET /api/kiosks", s.handleListKiosks)
 	mux.HandleFunc("POST /api/kiosks/{id}/sessions", s.handlePush)
 	mux.HandleFunc("/ws", s.handleWS)
+
 	mux.Handle("/", http.FileServer(http.Dir("./web/dist")))
 
 	s.httpServer = &http.Server{
@@ -67,7 +63,8 @@ func NewServer(port int, db *database.Queries) (server, error) {
 func (s *server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m := httpsnoop.CaptureMetrics(next, w, r)
-		s.logger.Info("request",
+		s.logger.Info(
+			"request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", m.Code,
@@ -115,4 +112,3 @@ func (s *server) Start() error {
 
 	return nil
 }
-

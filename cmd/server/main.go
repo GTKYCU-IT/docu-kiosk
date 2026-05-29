@@ -7,12 +7,15 @@ import (
 
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/server"
+	"github.com/joho/godotenv"
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
 func main() {
-	if err := os.MkdirAll("./data", 0755); err != nil {
+	godotenv.Load()
+
+	if err := os.MkdirAll("./data", 0o755); err != nil {
 		slog.Error("create data dir", "error", err)
 		os.Exit(1)
 	}

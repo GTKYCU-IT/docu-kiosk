@@ -389,4 +389,3 @@ func TestRegisterThenConnect(t *testing.T) {
 		t.Errorf("expected 1 kiosk in hub, got %v", s.hub.Connected())
 	}
 }
-
