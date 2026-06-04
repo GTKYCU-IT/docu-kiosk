@@ -20,7 +20,7 @@ type RefreshToken struct {
 	Token     string
 	CreatedAt time.Time
 	UpdatedAt time.Time
-	UserID    string
+	UserID    uuid.UUID
 	ExpiresAt time.Time
 	RevokedAt *time.Time
 }

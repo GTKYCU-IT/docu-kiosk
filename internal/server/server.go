@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,9 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/calvertjadon/docu-kiosk/internal/auth"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
 	"github.com/felixge/httpsnoop"
+	"github.com/google/uuid"
 )
 
 type server struct {
@@ -34,6 +37,25 @@ func newLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 }
 
+func (s *server) ensureAdminUser() {
+	if _, err := s.db.GetUserByUsername(context.Background(), "admin"); err != nil {
+		hash, err := auth.HashPassword("admin")
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if _, err = s.db.CreateUser(context.Background(), database.CreateUserParams{
+			ID:       uuid.New(),
+			Username: "admin",
+			Password: hash,
+		}); err != nil {
+			log.Fatal(err)
+		}
+
+		slog.Info("created admin user successfully")
+	}
+}
+
 func NewServer(port int, db *database.Queries) (server, error) {
 	s := server{
 		db:     db,
@@ -42,8 +64,12 @@ func NewServer(port int, db *database.Queries) (server, error) {
 		logger: newLogger(),
 	}
 
+	s.ensureAdminUser()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /protected", s.ensureAuthMiddlware(s.handleProtected))
+	mux.HandleFunc("POST /login", s.handleLogin)
+	mux.HandleFunc("POST /refresh", s.handleRefresh)
 
 	mux.HandleFunc("POST /api/kiosks", s.handleRegister)
 	mux.HandleFunc("GET /api/kiosks", s.handleListKiosks)

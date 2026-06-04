@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -39,7 +40,7 @@ func (s *server) handleProtected(w http.ResponseWriter, r *http.Request, user da
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *server) handleAuthenticate(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	params := struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -62,20 +63,87 @@ func (s *server) handleAuthenticate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokenString, err := auth.GenerateJWT(user.ID, s.jwtKey, time.Minute*5)
+	tokenString, err := auth.GenerateJWT(user.ID, s.jwtKey, time.Second*15)
 	if err != nil {
 		respondWithError(w, "Token creation failed", http.StatusInternalServerError, err)
+		return
 	}
 
-	refreshToken := auth.MakeRefreshToken()
-
-	// TODO: persist refresh token to DB
+	refreshToken, err := s.db.MakeRefreshToken(r.Context(), user.ID)
+	if err != nil {
+		respondWithError(w, "Refresh token creation failed", http.StatusInternalServerError, err)
+		return
+	}
 
 	respondWithJSON(w, http.StatusOK, struct {
 		JWT          string `json:"jwt"`
 		RefreshToken string `json:"refresh_token"`
 	}{
 		JWT:          tokenString,
-		RefreshToken: refreshToken,
+		RefreshToken: refreshToken.Token,
 	})
+}
+
+func (s *server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	refreshTokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, "failed to authenticate user", http.StatusUnauthorized, err)
+		return
+	}
+
+	rt, err := s.db.GetRefreshToken(r.Context(), refreshTokenString)
+	if err != nil {
+		respondWithError(w, "failed to authenticate user", http.StatusUnauthorized, err)
+		return
+	}
+
+	if isRevoked(rt) || isExpired(rt) {
+		respondWithError(w, "bad refresh token", http.StatusUnauthorized, err)
+		return
+	}
+
+	// issue new jwt
+
+	token, err := auth.GenerateJWT(rt.UserID, s.jwtKey, time.Second*15)
+	if err != nil {
+		respondWithError(w, "failed to create jwt", http.StatusInternalServerError, err)
+		return
+	}
+
+	// invalidate existing refresh token
+
+	if err := s.db.RevokeRefreshToken(r.Context(), rt.Token); err != nil {
+		respondWithError(w, "failed to revoke refresh token", http.StatusInternalServerError, err)
+		return
+	}
+
+	rt, err = s.db.MakeRefreshToken(r.Context(), rt.UserID)
+	if err != nil {
+		respondWithError(w, "failed to create refresh token", http.StatusInternalServerError, err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, struct {
+		JWT          string `json:"jwt"`
+		RefreshToken string `json:"refresh_token"`
+	}{
+		JWT:          token,
+		RefreshToken: rt.Token,
+	})
+}
+
+func isRevoked(rt database.RefreshToken) bool {
+	revoked := rt.RevokedAt != nil
+	if revoked {
+		slog.Info("revoked")
+	}
+	return revoked
+}
+
+func isExpired(rt database.RefreshToken) bool {
+	expired := rt.ExpiresAt.UTC().Before(time.Now().UTC())
+	if expired {
+		slog.Info("expired: " + rt.ExpiresAt.String())
+	}
+	return expired
 }
