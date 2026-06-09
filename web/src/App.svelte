@@ -18,7 +18,8 @@
     | "waiting"
     | "signing";
 
-  let view = $state<View>(!isStandalone ? "install" : "validating");
+  // let view = $state<View>(!isStandalone ? "install" : "validating");
+  let view = $state<View>("validating");
 
   let kioskName = $state("");
   let signingUrl = $state("");
