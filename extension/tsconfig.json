@@ -11,7 +11,7 @@
       "@/*": ["src/*"],
       "$lib/*": ["src/lib/*"]
     },
-    "types": ["vite/client", "@crxjs/vite-plugin/client", "chrome"],
+    "types": ["vite/client", "@crxjs/vite-plugin/client", "chrome", "node"],
     "allowImportingTsExtensions": true,
     "strict": true,
     "noFallthroughCasesInSwitch": true,
