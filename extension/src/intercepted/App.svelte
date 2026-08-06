@@ -74,11 +74,27 @@
   }
 
   async function bypass() {
-    const response = await chrome.runtime.sendMessage({ type: 'bypass', url: pendingUrl }).catch(() => ({ error: 'sendMessage failed' }))
-    if (response?.error) {
-      await copyPendingUrl()
-      toast.error('Could not open in browser. The URL has been copied to your clipboard.')
+    // MV3 service workers can be idle when the intercepted page has been open
+    // for a while.  chrome.runtime.sendMessage must wake the worker, and the
+    // first attempt can race with startup — retry a few times with backoff.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await chrome.runtime.sendMessage({ type: 'bypass', url: pendingUrl })
+        if (response?.error) {
+          await copyPendingUrl()
+          toast.error('Could not open in browser. The URL has been copied to your clipboard.')
+          return
+        }
+        return // success
+      } catch (err) {
+        if (attempt < 2) {
+          await new Promise(r => setTimeout(r, 300 * (attempt + 1)))
+        }
+      }
     }
+    // All retries exhausted
+    await copyPendingUrl()
+    toast.error('Could not open in browser. The URL has been copied to your clipboard.')
   }
 
   async function copyPendingUrl() {

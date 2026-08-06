@@ -14,16 +14,12 @@ export const SIGNING_URL_FILTERS: string[] = [
   '^https://[^/]*\\.docusign\\.net/Member/PowerForm', // PowerForms
   '^https://apps\\.docusign\\.com/authenticate', // new embedded-signing host (2026)
 ]
-
-/** Rule IDs 1–4 are the intercept patterns. IDs 5–99 are reserved. IDs 100+ are per-tab bypass allow rules. */
-const BYPASS_RULE_START_ID = 100
-let nextBypassRuleId = BYPASS_RULE_START_ID
+/** Rule IDs 1–4 are the intercept patterns. */
 
 const ALL_RULE_IDS = [1, 2, 3, 4]
-const BYPASS_HOSTS = ['*://*.docusign.net/*', '*://*.docusign.com/*']
 
-/** Active bypass rule IDs, keyed by tabId. Used for cleanup when a bypass tab closes. */
-const bypassRuleIds = new Map<number, number[]>()
+/** Window (ms) during which DocuSign interception is disabled for a bypass. */
+const BYPASS_WINDOW_MS = 15_000
 
 export function buildRules(interceptBaseUrl: string): chrome.declarativeNetRequest.Rule[] {
   const action: chrome.declarativeNetRequest.RuleAction = {
@@ -41,67 +37,61 @@ export function buildRules(interceptBaseUrl: string): chrome.declarativeNetReque
     condition: { regexFilter, resourceTypes: mainFrame }
   }))
 }
-
-export function buildBypassRules(tabId: number, startId: number): chrome.declarativeNetRequest.Rule[] {
-  return BYPASS_HOSTS.map((urlFilter, i) => ({
-    id: startId + i,
-    priority: 100,
-    action: { type: 'allow' as const },
-    condition: {
-      urlFilter,
-      resourceTypes: ['main_frame' as chrome.declarativeNetRequest.ResourceType],
-      tabIds: [tabId]
-    }
-  }))
-}
-
+/**
+ * Open a DocuSign URL in a new browser tab, bypassing interception.
+ *
+ * The service worker temporarily removes every intercept rule for a short
+ * window so the tab — and any redirect chain DocuSign performs — loads without
+ * re-interception.  After the window the rules are reinstalled.
+ */
 export async function handleBypass(url: string) {
+  // Remove every intercept rule so the tab can navigate freely.
+  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: ALL_RULE_IDS })
+
+  let restored = false
+  const restoreRules = () => {
+    if (restored) return
+    restored = true
+    const rules = buildRules(chrome.runtime.getURL('src/intercepted/index.html'))
+    chrome.declarativeNetRequest.updateDynamicRules({ addRules: rules }).catch(
+      (err: unknown) => console.error('[docu-kiosk] bypass: failed to restore intercept rules:', err)
+    )
+  }
+
   try {
-    const tab = await chrome.tabs.create({ url: 'about:blank', active: false })
-    if (!tab.id) throw new Error('tab has no id')
+    const tab = await chrome.tabs.create({ url, active: true })
 
-    const ruleIds = [nextBypassRuleId, nextBypassRuleId + 1]
-    const rules = buildBypassRules(tab.id, nextBypassRuleId)
-    nextBypassRuleId += 2
-
-    await chrome.declarativeNetRequest.updateDynamicRules({ addRules: rules })
-    bypassRuleIds.set(tab.id, ruleIds)
-
-    await chrome.tabs.update(tab.id, { url, active: true })
+    // Restore rules when the main frame finishes loading (covers 302
+    // redirect chains) — or after the safety window, whichever comes first.
+    const listener = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
+      if (details.tabId === tab.id && details.frameId === 0) {
+        chrome.webNavigation.onCompleted.removeListener(listener)
+        restoreRules()
+      }
+    }
+    chrome.webNavigation.onCompleted.addListener(listener)
+    setTimeout(restoreRules, BYPASS_WINDOW_MS)
   } catch (err) {
-    console.error('[docu-kiosk] bypass failed:', err)
+    // Tab creation failed — restore rules immediately so interception works
+    // for other tabs.
+    restoreRules()
     throw err
   }
 }
 
-function removeBypassRules(tabId: number) {
-  const ruleIds = bypassRuleIds.get(tabId)
-  if (!ruleIds) return
-  bypassRuleIds.delete(tabId)
-  void chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: ruleIds })
-}
 
 export async function installRules() {
   try {
-    // Sweep all intercept rules (1-4) and any stale bypass rules (100+) from
-    // a prior service-worker run that ended without onRemoved firing.
+    // Sweep all intercept rules (IDs 1-4) from any prior service-worker run
+    // that left them behind, then install the current set.
     const rules = buildRules(chrome.runtime.getURL('src/intercepted/index.html'))
     await chrome.declarativeNetRequest.updateDynamicRules({
       removeRuleIds: ALL_RULE_IDS,
       addRules: rules
     })
-    // Clean up any stale bypass rules (100+) left over from a previous
-    // service-worker instance that terminated without onRemoved firing.
-    const existing = await chrome.declarativeNetRequest.getDynamicRules()
-    const staleBypassIds = existing
-      .map((r) => r.id)
-      .filter((id) => id >= BYPASS_RULE_START_ID)
-    if (staleBypassIds.length > 0) {
-      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: staleBypassIds })
-    }
   } catch (err) {
-    // A rejected install (e.g. an oversized regex) used to fail silently and
-    // disable interception with no trace — surface it in the SW console.
+    // A rejected install (e.g. an oversized regex) used to fail silently
+    // and disable interception with no trace — surface it in the SW console.
     console.error('[docu-kiosk] failed to install interception rules:', err)
   }
 }
@@ -126,17 +116,15 @@ if (typeof globalThis.chrome !== 'undefined') {
     { url: [{ hostSuffix: 'docusign.net' }, { hostSuffix: 'docusign.com' }] }
   )
 
-  // Bypass: when a bypass tab closes, remove its allow rules.
-  chrome.tabs.onRemoved.addListener((tabId) => removeBypassRules(tabId))
-
-  // Bypass: listen for bypass requests from the intercepted page.
+  // Listen for bypass requests from the intercepted page.
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === 'bypass' && typeof message.url === 'string') {
       handleBypass(message.url).then(
         () => sendResponse(),
-        (err) => sendResponse({ error: String(err) })
+        (err: unknown) => sendResponse({ error: String(err) })
       )
       return true // keep the channel open for the async response
     }
   })
 }
+

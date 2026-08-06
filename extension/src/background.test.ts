@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { SIGNING_URL_FILTERS, buildRules, buildBypassRules } from './background'
+import { SIGNING_URL_FILTERS, buildRules } from './background'
 
 // A URL matches the interception rules if any of the short per-pattern rules match.
 const matchAnySigningFilter = (url: string) =>
@@ -105,39 +105,3 @@ describe('buildRules', () => {
   })
 })
 
-describe('buildBypassRules', () => {
-  it('creates two allow rules for a bypass tab, one per DocuSign host', () => {
-    const rules = buildBypassRules(42, 100)
-    expect(rules).toHaveLength(2)
-    expect(rules.map((r) => r.id)).toEqual([100, 101])
-    expect(rules.every((r) => r.priority === 100)).toBe(true)
-    expect(rules.every((r) => r.action.type === 'allow')).toBe(true)
-    expect(rules.every((r) => r.condition.resourceTypes)).toBe(true)
-    expect(rules.every((r) => r.condition.resourceTypes?.includes('main_frame' as chrome.declarativeNetRequest.ResourceType))).toBe(true)
-    expect(rules.every((r) => r.condition.tabIds)).toBe(true)
-    expect(rules.every((r) => r.condition.tabIds?.includes(42))).toBe(true)
-  })
-
-  it('scopes each rule to the provided tabId', () => {
-    const rulesA = buildBypassRules(10, 200)
-    const rulesB = buildBypassRules(20, 300)
-    expect(rulesA[0].condition.tabIds).toEqual([10])
-    expect(rulesB[0].condition.tabIds).toEqual([20])
-  })
-
-  it('matches docusign.net and docusign.com hosts via urlFilter', () => {
-    const rules = buildBypassRules(1, 100)
-    expect(rules[0].condition.urlFilter).toBe('*://*.docusign.net/*')
-    expect(rules[1].condition.urlFilter).toBe('*://*.docusign.com/*')
-  })
-
-  it('produces allow rules that out-prioritise the intercept redirect rules', () => {
-    const bypass = buildBypassRules(1, 100)
-    const intercept = buildRules('chrome-extension://x/src/intercepted/index.html')
-    for (const br of bypass) {
-      for (const ir of intercept) {
-        expect(br.priority!).toBeGreaterThan(ir.priority!)
-      }
-    }
-  })
-})
