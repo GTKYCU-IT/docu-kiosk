@@ -12,8 +12,8 @@
   let kiosks = $state<Kiosk[]>([])
   let sending = $state(false)
   let copied = $state(false)
-  let brokerUrl = ''
-  let pendingUrl = ''
+  let brokerUrl = $state('')
+  let pendingUrl = $state('')
   let pollInterval: ReturnType<typeof setInterval> | undefined
 
   onMount(async () => {
