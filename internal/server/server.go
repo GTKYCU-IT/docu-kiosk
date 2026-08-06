@@ -102,7 +102,8 @@ func (s *server) loggingMiddleware(next http.Handler) http.Handler {
 }
 
 type corsConfig struct {
-	allowedOrigins []string // full origins matched exactly, except "chrome-extension://" which is a prefix
+	allowedOrigins []string    // full origins matched exactly, except "chrome-extension://" which is a prefix
+	logger         *slog.Logger
 }
 
 // newCORSConfig reads CORS_ORIGINS (comma-separated).  Entries without a
@@ -128,7 +129,7 @@ func newCORSConfig(logger *slog.Logger) *corsConfig {
 			trimmed = append(trimmed, t)
 		}
 		if len(trimmed) > 0 {
-			return &corsConfig{allowedOrigins: trimmed}
+			return &corsConfig{allowedOrigins: trimmed, logger: logger}
 		}
 		// All entries were blank or invalid — fall through to defaults.
 	}
@@ -143,7 +144,7 @@ func newCORSConfig(logger *slog.Logger) *corsConfig {
 	if host := os.Getenv("BROKER_HOST"); host != "" {
 		origins = append(origins, "https://"+host)
 	}
-	return &corsConfig{allowedOrigins: origins}
+	return &corsConfig{allowedOrigins: origins, logger: logger}
 }
 
 func (c *corsConfig) isAllowed(origin string) bool {
@@ -175,7 +176,9 @@ func (c *corsConfig) middleware(next http.Handler) http.Handler {
 			// path — browsers always send Origin on WebSocket
 			// handshakes, so a kiosk SPA served from an unlisted
 			// origin will be rejected here before the upgrade.
-			slog.Warn("cors: rejected origin", "origin", origin, "method", r.Method, "path", r.URL.Path)
+			if c.logger != nil {
+				c.logger.Warn("cors: rejected origin", "origin", origin, "method", r.Method, "path", r.URL.Path)
+			}
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
