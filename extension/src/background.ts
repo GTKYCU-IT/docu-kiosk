@@ -15,7 +15,15 @@ export const SIGNING_URL_FILTERS: string[] = [
   '^https://apps\\.docusign\\.com/authenticate', // new embedded-signing host (2026)
 ]
 
+/** Rule IDs 1–4 are the intercept patterns. IDs 5–99 are reserved. IDs 100+ are per-tab bypass allow rules. */
+const BYPASS_RULE_START_ID = 100
+let nextBypassRuleId = BYPASS_RULE_START_ID
+
 const ALL_RULE_IDS = [1, 2, 3, 4]
+const BYPASS_HOSTS = ['*://*.docusign.net/*', '*://*.docusign.com/*']
+
+/** Active bypass rule IDs, keyed by tabId. Used for cleanup when a bypass tab closes. */
+const bypassRuleIds = new Map<number, number[]>()
 
 export function buildRules(interceptBaseUrl: string): chrome.declarativeNetRequest.Rule[] {
   const action: chrome.declarativeNetRequest.RuleAction = {
@@ -34,10 +42,63 @@ export function buildRules(interceptBaseUrl: string): chrome.declarativeNetReque
   }))
 }
 
+export function buildBypassRules(tabId: number, startId: number): chrome.declarativeNetRequest.Rule[] {
+  return BYPASS_HOSTS.map((urlFilter, i) => ({
+    id: startId + i,
+    priority: 100,
+    action: { type: 'allow' as const },
+    condition: {
+      urlFilter,
+      resourceTypes: ['main_frame' as chrome.declarativeNetRequest.ResourceType],
+      tabIds: [tabId]
+    }
+  }))
+}
+
+export async function handleBypass(url: string) {
+  try {
+    const tab = await chrome.tabs.create({ url: 'about:blank', active: true })
+    if (!tab.id) throw new Error('tab has no id')
+
+    const ruleIds = [nextBypassRuleId, nextBypassRuleId + 1]
+    const rules = buildBypassRules(tab.id, nextBypassRuleId)
+    nextBypassRuleId += 2
+
+    await chrome.declarativeNetRequest.updateDynamicRules({ addRules: rules })
+    bypassRuleIds.set(tab.id, ruleIds)
+
+    await chrome.tabs.update(tab.id, { url })
+  } catch (err) {
+    console.error('[docu-kiosk] bypass failed:', err)
+    throw err
+  }
+}
+
+function removeBypassRules(tabId: number) {
+  const ruleIds = bypassRuleIds.get(tabId)
+  if (!ruleIds) return
+  bypassRuleIds.delete(tabId)
+  void chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: ruleIds })
+}
+
 export async function installRules() {
   try {
+    // Sweep all intercept rules (1-4) and any stale bypass rules (100+) from
+    // a prior service-worker run that ended without onRemoved firing.
     const rules = buildRules(chrome.runtime.getURL('src/intercepted/index.html'))
-    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: ALL_RULE_IDS, addRules: rules })
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: ALL_RULE_IDS,
+      addRules: rules
+    })
+    // Clean up any stale bypass rules (100+) left over from a previous
+    // service-worker instance that terminated without onRemoved firing.
+    const existing = await chrome.declarativeNetRequest.getDynamicRules()
+    const staleBypassIds = existing
+      .map((r) => r.id)
+      .filter((id) => id >= BYPASS_RULE_START_ID)
+    if (staleBypassIds.length > 0) {
+      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: staleBypassIds })
+    }
   } catch (err) {
     // A rejected install (e.g. an oversized regex) used to fail silently and
     // disable interception with no trace — surface it in the SW console.
@@ -64,4 +125,18 @@ if (typeof globalThis.chrome !== 'undefined') {
     },
     { url: [{ hostSuffix: 'docusign.net' }, { hostSuffix: 'docusign.com' }] }
   )
+
+  // Bypass: when a bypass tab closes, remove its allow rules.
+  chrome.tabs.onRemoved.addListener((tabId) => removeBypassRules(tabId))
+
+  // Bypass: listen for bypass requests from the intercepted page.
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === 'bypass' && typeof message.url === 'string') {
+      handleBypass(message.url).then(
+        () => sendResponse(),
+        (err) => sendResponse({ error: String(err) })
+      )
+      return true // keep the channel open for the async response
+    }
+  })
 }

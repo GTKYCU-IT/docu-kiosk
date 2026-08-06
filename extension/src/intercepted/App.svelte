@@ -2,8 +2,9 @@
   import { onMount, onDestroy } from 'svelte'
   import { getConfig } from '../config'
   import { Button } from '$lib/components/ui/button'
-  import { Send } from '@lucide/svelte'
+  import { ExternalLink, Send } from '@lucide/svelte'
   import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '$lib/components/ui/card'
+  import { toast } from 'svelte-sonner'
 
   type Kiosk = { id: string; name: string }
 
@@ -72,6 +73,14 @@
     }
   }
 
+  async function bypass() {
+    const response = await chrome.runtime.sendMessage({ type: 'bypass', url: pendingUrl }).catch(() => ({ error: 'sendMessage failed' }))
+    if (response?.error) {
+      await copyPendingUrl()
+      toast.error('Could not open in browser. The URL has been copied to your clipboard.')
+    }
+  }
+
   async function copyPendingUrl() {
     try {
       await navigator.clipboard.writeText(pendingUrl)
@@ -108,6 +117,17 @@
       {:else}
         <p class="text-sm text-muted-foreground">{status || 'No kiosks are connected. Waiting…'}</p>
       {/if}
+
+      {#if pendingUrl}
+        <Button
+          variant="ghost"
+          class="w-full justify-start"
+          onclick={bypass}
+        >
+          <ExternalLink class="mr-2 size-4" />Open in browser
+        </Button>
+      {/if}
+
       <details class="mt-4 rounded-md border p-2">
         <summary class="cursor-pointer select-none text-xs text-muted-foreground">Original URL</summary>
         <div class="mt-2 flex items-center gap-2">

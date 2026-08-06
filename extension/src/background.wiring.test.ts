@@ -4,18 +4,32 @@ import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
 // chrome mock BEFORE importing it. Vitest isolates modules per test file, so
 // this does not affect the pure-logic tests in background.test.ts.
 const updateDynamicRules = vi.fn()
+const getDynamicRules = vi.fn()
 const getURL = vi.fn()
 const tabsCreate = vi.fn()
+const tabsUpdate = vi.fn()
 const actionOnClicked = vi.fn()
+const onMessageAddListener = vi.fn()
+const onRemovedAddListener = vi.fn()
 const webNavOnBeforeNavigate = vi.fn()
 const storageManagedGet = vi.fn()
 const storageLocalGet = vi.fn()
 
 vi.stubGlobal('chrome', {
-  declarativeNetRequest: { updateDynamicRules },
-  runtime: { getURL },
+  declarativeNetRequest: {
+    updateDynamicRules,
+    getDynamicRules
+  },
+  runtime: {
+    getURL,
+    onMessage: { addListener: onMessageAddListener }
+  },
   action: { onClicked: { addListener: actionOnClicked } },
-  tabs: { create: tabsCreate },
+  tabs: {
+    create: tabsCreate,
+    update: tabsUpdate,
+    onRemoved: { addListener: onRemovedAddListener }
+  },
   webNavigation: { onBeforeNavigate: { addListener: webNavOnBeforeNavigate } },
   storage: {
     managed: { get: storageManagedGet },
@@ -23,7 +37,11 @@ vi.stubGlobal('chrome', {
   }
 })
 
-const { SIGNING_URL_FILTERS, installRules } = await import('./background')
+const {
+  SIGNING_URL_FILTERS,
+  installRules,
+  handleBypass
+} = await import('./background')
 const { getConfig } = await import('./config')
 
 // Capture the startup install + listeners registered at import time, since
@@ -38,13 +56,37 @@ const navListener = webNavOnBeforeNavigate.mock.calls[0]?.[0] as
 const navFilter = webNavOnBeforeNavigate.mock.calls[0]?.[1] as
   | { url: { hostSuffix: string }[] }
   | undefined
+const onMessageListener = onMessageAddListener.mock.calls[0]?.[0] as
+  | ((
+    message: unknown,
+    sender: unknown,
+    sendResponse: (response?: unknown) => void
+  ) => boolean | undefined)
+  | undefined
+const onRemovedListener = onRemovedAddListener.mock.calls[0]?.[0] as
+  | ((tabId: number) => void)
+  | undefined
 
 beforeEach(() => {
   vi.clearAllMocks()
   updateDynamicRules.mockResolvedValue(undefined)
+  getDynamicRules.mockResolvedValue([])
   getURL.mockImplementation((p: string) => `chrome-extension://testid/${p}`)
+  tabsCreate.mockResolvedValue({ id: 99 })
+  tabsUpdate.mockResolvedValue(undefined)
   storageManagedGet.mockResolvedValue({})
   storageLocalGet.mockResolvedValue({ brokerUrl: 'https://broker.internal' })
+  // Re-register the startup listener mocks since we cleared them
+  actionOnClicked.mockImplementation((fn: () => void) => { actionOnClicked.mock.calls.push([fn]) })
+  webNavOnBeforeNavigate.mockImplementation((fn: () => void, filter: unknown) => {
+    webNavOnBeforeNavigate.mock.calls.push([fn, filter])
+  })
+  onMessageAddListener.mockImplementation((fn: () => void) => {
+    onMessageAddListener.mock.calls.push([fn])
+  })
+  onRemovedAddListener.mockImplementation((fn: () => void) => {
+    onRemovedAddListener.mock.calls.push([fn])
+  })
 })
 
 afterAll(() => vi.unstubAllGlobals())
@@ -78,6 +120,30 @@ describe('rule installation', () => {
       '[docu-kiosk] failed to install interception rules:',
       expect.any(Error)
     )
+  })
+
+  it('sweeps stale bypass rules (IDs >= 100) on startup', async () => {
+    getDynamicRules.mockResolvedValue([
+      { id: 100, priority: 100, action: { type: 'allow' }, condition: {} },
+      { id: 101, priority: 100, action: { type: 'allow' }, condition: {} }
+    ] as chrome.declarativeNetRequest.Rule[])
+    await installRules()
+    // The last updateDynamicRules call should remove the stale bypass IDs
+    const calls = updateDynamicRules.mock.calls
+    const lastCall = calls[calls.length - 1]
+    expect(lastCall).toBeDefined()
+    expect(lastCall[0].removeRuleIds).toContain(100)
+    expect(lastCall[0].removeRuleIds).toContain(101)
+  })
+
+  it('does not sweep when there are no stale bypass rules', async () => {
+    getDynamicRules.mockResolvedValue([])
+    await installRules()
+    // No sweep call for bypass rules when none exist
+    const removalCalls = updateDynamicRules.mock.calls.filter(
+      (c) => c[0].removeRuleIds?.some((id: number) => id >= 100)
+    )
+    expect(removalCalls).toHaveLength(0)
   })
 })
 
@@ -123,5 +189,146 @@ describe('config', () => {
     storageLocalGet.mockResolvedValue({ brokerUrl: 'https://broker.local' })
     const cfg = await getConfig()
     expect(cfg.brokerUrl).toBe('https://broker.managed')
+  })
+})
+
+describe('bypass message handler', () => {
+  const testUrl = 'https://demo.docusign.net/Signing/StartInSession.aspx?t=abc'
+
+  it('creates a blank tab, installs bypass rules, and navigates to the URL', async () => {
+    await handleBypass(testUrl)
+
+    expect(tabsCreate).toHaveBeenCalledWith({ url: 'about:blank', active: true })
+
+    const rulesCall = updateDynamicRules.mock.calls.find(
+      (c) => c[0].addRules?.length > 0
+    )
+    expect(rulesCall).toBeDefined()
+    const added = rulesCall![0].addRules as chrome.declarativeNetRequest.Rule[]
+    expect(added).toHaveLength(2)
+    expect(added[0].action.type).toBe('allow')
+    expect(added[0].priority).toBe(100)
+    expect(added[0].condition.tabIds).toEqual([99])
+    expect(added[1].condition.tabIds).toEqual([99])
+
+    expect(tabsUpdate).toHaveBeenCalledWith(99, { url: testUrl })
+  })
+
+  it('handles bypass via the runtime.onMessage listener', async () => {
+    expect(onMessageListener).toBeTypeOf('function')
+
+    const sendResponse = vi.fn()
+    const result = onMessageListener!(
+      { type: 'bypass', url: testUrl },
+      {},
+      sendResponse
+    )
+
+    // Should return true to keep the channel open for async response
+    expect(result).toBe(true)
+
+    // Wait for the async handler chain (tabs.create → updateDynamicRules → tabs.update)
+    await vi.waitFor(() => {
+      expect(tabsCreate).toHaveBeenCalled()
+      expect(sendResponse).toHaveBeenCalled()
+    })
+  })
+
+  it('sends an error response when bypass fails', async () => {
+    tabsCreate.mockRejectedValueOnce(new Error('quota exhausted'))
+
+    const sendResponse = vi.fn()
+    onMessageListener!(
+      { type: 'bypass', url: testUrl },
+      {},
+      sendResponse
+    )
+
+    // Wait for the async handler to fail and send the error response
+    await vi.waitFor(() => {
+      expect(sendResponse).toHaveBeenCalledWith({ error: expect.stringContaining('quota') })
+    })
+  })
+
+  it('ignores messages that are not bypass requests', () => {
+    const sendResponse = vi.fn()
+    const result = onMessageListener!({ type: 'other' }, {}, sendResponse)
+    expect(result).toBeUndefined()
+    expect(sendResponse).not.toHaveBeenCalled()
+  })
+})
+
+describe('bypass tab cleanup', () => {
+  const testUrl = 'https://demo.docusign.net/Signing/abc'
+
+  it('removes bypass rules when the bypass tab closes', async () => {
+    await handleBypass(testUrl)
+
+    // The tab was created with id 99
+    expect(onRemovedListener).toBeTypeOf('function')
+    onRemovedListener!(99)
+
+    const removalCall = updateDynamicRules.mock.calls.find(
+      (c) => c[0].removeRuleIds?.length === 2
+    )
+    expect(removalCall).toBeDefined()
+    expect(removalCall![0].removeRuleIds).toHaveLength(2)
+    expect(removalCall![0].removeRuleIds!.every((id: number) => id >= 100)).toBe(true)
+  })
+
+  it('does not error when an unknown tab is removed', () => {
+    expect(() => onRemovedListener!(999)).not.toThrow()
+  })
+})
+
+describe('multi-tab bypass', () => {
+  it('allocates distinct rule IDs for each bypass tab', async () => {
+    tabsCreate
+      .mockResolvedValueOnce({ id: 10 })
+      .mockResolvedValueOnce({ id: 20 })
+
+    await handleBypass('https://demo.docusign.net/Signing/a')
+    const firstCall = updateDynamicRules.mock.calls.find(
+      (c) => c[0].addRules?.length === 2
+    )
+    const firstIds = (firstCall![0].addRules as chrome.declarativeNetRequest.Rule[]).map((r) => r.id)
+
+    await handleBypass('https://demo.docusign.net/Signing/b')
+    // Find the second addRules call after the first
+    const addCalls = updateDynamicRules.mock.calls.filter(
+      (c) => c[0].addRules?.length === 2
+    )
+    const secondIds = (addCalls[1][0].addRules as chrome.declarativeNetRequest.Rule[]).map((r) => r.id)
+
+    // IDs should not overlap
+    const allIds = [...firstIds, ...secondIds]
+    expect(new Set(allIds).size).toBe(allIds.length)
+  })
+
+  it('removes only the closed tab rules, leaving the other tab rules intact', async () => {
+    tabsCreate
+      .mockResolvedValueOnce({ id: 10 })
+      .mockResolvedValueOnce({ id: 20 })
+
+    await handleBypass('https://demo.docusign.net/Signing/a')
+    await handleBypass('https://demo.docusign.net/Signing/b')
+
+    // Close tab 10
+    onRemovedListener!(10)
+
+    const removalCalls = updateDynamicRules.mock.calls.filter(
+      (c) => c[0].removeRuleIds?.length === 2
+    )
+    expect(removalCalls).toHaveLength(1)
+
+    // Close tab 20
+    onRemovedListener!(20)
+    const allRemovalCalls = updateDynamicRules.mock.calls.filter(
+      (c) => c[0].removeRuleIds?.length === 2
+    )
+    expect(allRemovalCalls).toHaveLength(2)
+    // The two removal calls should remove different rule ID sets
+    expect(allRemovalCalls[0][0].removeRuleIds).not.toEqual(
+      allRemovalCalls[1][0].removeRuleIds)
   })
 })
