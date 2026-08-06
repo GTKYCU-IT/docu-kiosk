@@ -57,53 +57,29 @@ export function buildBypassRules(tabId: number, startId: number): chrome.declara
 /**
  * Open a DocuSign URL in a new browser tab, bypassing interception.
  *
- * Two-phase strategy:
- * 1. Remove every intercept rule so the initial navigation (and any 302
- *    redirect chain) loads without re-interception.
- * 2. Once the main frame finishes loading, install a tab-scoped allow rule
- *    and restore the global intercept rules.  The allow rule protects all
- *    subsequent navigations in the same tab — including multi-page signing
- *    flows — for the tab's entire lifetime.
+ * Creates a blank tab to obtain a stable tabId, installs tab-scoped allow
+ * rules that out-prioritise the intercept redirect rules, then navigates the
+ * tab to the URL.  Every step is awaited so the service worker stays alive
+ * until the rules are committed and the navigation has started.
+ *
+ * The allow rules protect the tab for its entire lifetime — including
+ * multi-page signing flows and subsequent same-tab navigation.
  */
 export async function handleBypass(url: string) {
-  // Phase 1: remove all intercept rules so the tab can navigate freely.
-  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: ALL_RULE_IDS })
-
-  let finished = false
-  const finish = (tabId: number) => {
-    if (finished) return
-    finished = true
-    const allowIds = [nextBypassRuleId, nextBypassRuleId + 1]
-    const allowRules = buildBypassRules(tabId, nextBypassRuleId)
-    nextBypassRuleId += 2
-    const interceptRules = buildRules(chrome.runtime.getURL('src/intercepted/index.html'))
-    bypassRuleIds.set(tabId, allowIds)
-    chrome.declarativeNetRequest.updateDynamicRules({
-      addRules: [...allowRules, ...interceptRules]
-    }).catch(
-      (err: unknown) => console.error('[docu-kiosk] bypass: failed to install rules:', err)
-    )
-  }
-
-  // Safety: if onCompleted never fires, still finish after 15 s.
-  const SAFETY_TIMEOUT_MS = 15_000
-
   try {
-    const tab = await chrome.tabs.create({ url, active: true })
+    const tab = await chrome.tabs.create({ url: 'about:blank', active: false })
     if (!tab.id) throw new Error('tab has no id')
 
-    const listener = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
-      if (details.tabId === tab.id && details.frameId === 0) {
-        chrome.webNavigation.onCompleted.removeListener(listener)
-        finish(tab.id!)
-      }
-    }
-    chrome.webNavigation.onCompleted.addListener(listener)
-    setTimeout(() => finish(tab.id!), SAFETY_TIMEOUT_MS)
+    const ruleIds = [nextBypassRuleId, nextBypassRuleId + 1]
+    const rules = buildBypassRules(tab.id, nextBypassRuleId)
+    nextBypassRuleId += 2
+
+    await chrome.declarativeNetRequest.updateDynamicRules({ addRules: rules })
+    bypassRuleIds.set(tab.id, ruleIds)
+
+    await chrome.tabs.update(tab.id, { url, active: true })
   } catch (err) {
-    // Tab creation failed — restore intercept rules immediately.
-    const rules = buildRules(chrome.runtime.getURL('src/intercepted/index.html'))
-    chrome.declarativeNetRequest.updateDynamicRules({ addRules: rules }).catch(() => {})
+    console.error('[docu-kiosk] bypass failed:', err)
     throw err
   }
 }
