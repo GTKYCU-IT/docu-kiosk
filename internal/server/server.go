@@ -101,7 +101,7 @@ func NewServer(port int, db *database.Queries, authModule *auth.AuthModule) (*Se
 		logger: logger,
 		httpServer: &http.Server{
 			Addr:    fmt.Sprintf(":%d", port),
-			Handler: corsMiddleware(loggingMiddleware(logger, mux)),
+			Handler: loggingMiddleware(logger, newCORSConfig(logger).middleware(mux)),
 		},
 	}
 
@@ -122,14 +122,87 @@ func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	})
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
+type corsConfig struct {
+	allowedOrigins []string // full origins matched exactly, except "chrome-extension://" which is a prefix
+}
+
+// newCORSConfig reads CORS_ORIGINS (comma-separated).  Entries without a
+// scheme (bare hostnames) get https:// prepended automatically.  The only
+// origin that matches by prefix is "chrome-extension://"; any other
+// scheme-only entry is rejected with a warning.
+func newCORSConfig(logger *slog.Logger) *corsConfig {
+	if raw := strings.TrimSpace(os.Getenv("CORS_ORIGINS")); raw != "" {
+		origins := strings.Split(raw, ",")
+		trimmed := make([]string, 0, len(origins))
+		for _, o := range origins {
+			t := strings.TrimSpace(o)
+			if t == "" {
+				continue
+			}
+			if !strings.Contains(t, "://") {
+				// Bare hostname — assume https.
+				t = "https://" + t
+			} else if strings.HasSuffix(t, "://") && t != "chrome-extension://" {
+				logger.Warn("cors: ignoring scheme-only origin (only chrome-extension:// is supported for prefix matching)", "entry", o)
+				continue
+			}
+			trimmed = append(trimmed, t)
+		}
+		if len(trimmed) > 0 {
+			return &corsConfig{allowedOrigins: trimmed}
+		}
+		// All entries were blank or invalid — fall through to defaults.
+	}
+
+	// Defaults when CORS_ORIGINS is not set.
+	var origins []string
+	// Any Chrome extension — the extension ID is random per build, so we
+	// match by scheme prefix.  Operators who need tighter control should
+	// set CORS_ORIGINS to the exact chrome-extension://<id> of their CRX.
+	origins = append(origins, "chrome-extension://")
+	// Same-origin SPA served by the broker — exact match.
+	if host := os.Getenv("BROKER_HOST"); host != "" {
+		origins = append(origins, "https://"+host)
+	}
+	return &corsConfig{allowedOrigins: origins}
+}
+
+func (c *corsConfig) isAllowed(origin string) bool {
+	for _, allowed := range c.allowedOrigins {
+		if allowed == "chrome-extension://" {
+			if strings.HasPrefix(origin, allowed) {
+				return true
+			}
+		} else if origin == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *corsConfig) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if origin == "" {
+			// No Origin header — not a cross-origin request (same-origin
+			// or non-browser client); pass through.
+			next.ServeHTTP(w, r)
+			return
 		}
+		w.Header().Set("Vary", "Origin")
+		if !c.isAllowed(origin) {
+			// Fail closed: no Access-Control-Allow-Origin, browser
+			// blocks the response.  This also gates the /ws upgrade
+			// path — browsers always send Origin on WebSocket
+			// handshakes, so a kiosk SPA served from an unlisted
+			// origin will be rejected here before the upgrade.
+			slog.Warn("cors: rejected origin", "origin", origin, "method", r.Method, "path", r.URL.Path)
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
