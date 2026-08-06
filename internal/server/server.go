@@ -23,10 +23,10 @@ import (
 type server struct {
 	db         *database.Queries
 	hub        *hub.Hub
+	authModule *auth.AuthModule
 	httpServer *http.Server
 	logger     *slog.Logger
 	port       int
-	jwtKey     []byte
 }
 
 func newLogger() *slog.Logger {
@@ -37,34 +37,46 @@ func newLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 }
 
-func (s *server) ensureAdminUser() {
-	if _, err := s.db.GetUserByUsername(context.Background(), "admin"); err != nil {
-		hash, err := auth.HashPassword("admin")
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		if _, err = s.db.CreateUser(context.Background(), database.CreateUserParams{
-			ID:       uuid.New(),
-			Username: "admin",
-			Password: hash,
-		}); err != nil {
-			log.Fatal(err)
-		}
-
-		slog.Info("created admin user successfully")
+func (s *server) ensureAdminUser(username, password string) {
+	if username == "" || password == "" {
+		slog.Error("AUTH_USERNAME and AUTH_PASSWORD are required when the users table is empty")
+		os.Exit(1)
 	}
+
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if _, err := s.db.CreateUser(context.Background(), database.CreateUserParams{
+		ID:       uuid.New(),
+		Username: username,
+		Password: hash,
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	slog.Info("created admin user successfully", "username", username)
 }
 
-func NewServer(port int, db *database.Queries) (server, error) {
+func NewServer(port int, db *database.Queries, authModule *auth.AuthModule, adminUsername, adminPassword string) (server, error) {
 	s := server{
-		db:     db,
-		hub:    hub.New(),
-		port:   port,
-		logger: newLogger(),
+		db:         db,
+		hub:        hub.New(),
+		authModule: authModule,
+		port:       port,
+		logger:     newLogger(),
 	}
-
-	s.ensureAdminUser()
+	count, err := db.CountUsers(context.Background())
+	if err != nil {
+		return server{}, fmt.Errorf("count users: %w", err)
+	}
+	if count == 0 {
+		slog.Info("users table is empty, ensuring admin user exists")
+		s.ensureAdminUser(adminUsername, adminPassword)
+	} else {
+		slog.Info("users table has existing users, skipping admin creation")
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /protected", s.ensureAuthMiddlware(s.handleProtected))

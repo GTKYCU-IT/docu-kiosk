@@ -7,7 +7,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func GenerateJWT(userID uuid.UUID, key []byte, expiresIn time.Duration) (string, error) {
+func generateJWT(userID uuid.UUID, key []byte, expiresIn time.Duration) (string, error) {
 	claims := &jwt.RegisteredClaims{
 		Issuer:    "docu-kiosk",
 		IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
@@ -19,7 +19,7 @@ func GenerateJWT(userID uuid.UUID, key []byte, expiresIn time.Duration) (string,
 	return ss, err
 }
 
-func ValidateJWT(tokenString string, key []byte) (uuid.UUID, error) {
+func validateJWT(tokenString string, key []byte) (uuid.UUID, error) {
 	claims := jwt.RegisteredClaims{}
 	token, err := jwt.ParseWithClaims(tokenString, &claims, func(token *jwt.Token) (any, error) {
 		return key, nil

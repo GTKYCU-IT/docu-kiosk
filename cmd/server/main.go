@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/calvertjadon/docu-kiosk/internal/auth"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/server"
 	"github.com/joho/godotenv"
@@ -14,6 +15,15 @@ import (
 
 func main() {
 	godotenv.Load()
+
+	jwtKey := []byte(os.Getenv("DOCU_KIOSK_TOKEN_SECRET"))
+	if len(jwtKey) == 0 {
+		slog.Error("DOCU_KIOSK_TOKEN_SECRET is required")
+		os.Exit(1)
+	}
+
+	adminUsername := os.Getenv("AUTH_USERNAME")
+	adminPassword := os.Getenv("AUTH_PASSWORD")
 
 	if err := os.MkdirAll("./data", 0o755); err != nil {
 		slog.Error("create data dir", "error", err)
@@ -37,7 +47,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv, err := server.NewServer(8080, database.New(db))
+	queries := database.New(db)
+	authModule := auth.NewAuthModule(queries, jwtKey)
+
+	srv, err := server.NewServer(8080, queries, authModule, adminUsername, adminPassword)
 	if err != nil {
 		slog.Error("create server", "error", err)
 		os.Exit(1)
