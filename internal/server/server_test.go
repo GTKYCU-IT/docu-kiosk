@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/calvertjadon/docu-kiosk/internal/database"
-	"github.com/calvertjadon/docu-kiosk/internal/hub"
+	"github.com/calvertjadon/docu-kiosk/internal/session"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/pressly/goose/v3"
@@ -45,10 +45,12 @@ func newTestDB(t *testing.T) *database.Queries {
 
 func setupTestServer(t *testing.T) (*server, *httptest.Server) {
 	t.Helper()
+	db := newTestDB(t)
+	logger := newLogger()
 	s := &server{
-		db:     newTestDB(t),
-		hub:    hub.New(),
-		logger: newLogger(),
+		db:       db,
+		sessions: session.NewManager(logger),
+		logger:   logger,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/kiosks", s.handleRegister)
@@ -245,8 +247,8 @@ func TestWSConnectsWhenRegistered(t *testing.T) {
 	registerKiosk(t, ts, "lobby")
 	connectWS(t, ts)
 
-	if len(s.hub.Connected()) != 1 {
-		t.Errorf("expected 1 connected kiosk, got %v", s.hub.Connected())
+	if len(s.sessions.Connected()) != 1 {
+		t.Errorf("expected 1 connected kiosk, got %v", s.sessions.Connected())
 	}
 }
 
@@ -257,7 +259,7 @@ func TestWSDisconnectRemovesFromHub(t *testing.T) {
 	conn, _ := connectWS(t, ts)
 	conn.CloseNow()
 
-	waitFor(t, func() bool { return len(s.hub.Connected()) == 0 })
+	waitFor(t, func() bool { return len(s.sessions.Connected()) == 0 })
 }
 
 func TestWSReconnect(t *testing.T) {
@@ -266,10 +268,10 @@ func TestWSReconnect(t *testing.T) {
 
 	conn, _ := connectWS(t, ts)
 	conn.CloseNow()
-	waitFor(t, func() bool { return len(s.hub.Connected()) == 0 })
+	waitFor(t, func() bool { return len(s.sessions.Connected()) == 0 })
 
 	connectWS(t, ts)
-	waitFor(t, func() bool { return len(s.hub.Connected()) == 1 })
+	waitFor(t, func() bool { return len(s.sessions.Connected()) == 1 })
 }
 
 // --- Push ---
@@ -385,7 +387,7 @@ func TestRegisterThenConnect(t *testing.T) {
 		t.Errorf("expected name lobby from connected message, got %q", name)
 	}
 
-	if len(s.hub.Connected()) != 1 {
-		t.Errorf("expected 1 kiosk in hub, got %v", s.hub.Connected())
+	if len(s.sessions.Connected()) != 1 {
+		t.Errorf("expected 1 kiosk in sessions, got %v", s.sessions.Connected())
 	}
 }

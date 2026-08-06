@@ -57,20 +57,7 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/kiosks
 func (s *server) handleListKiosks(w http.ResponseWriter, r *http.Request) {
-	type KioskResponse struct {
-		ID   uuid.UUID `json:"id"`
-		Name string    `json:"name"`
-	}
-
-	connected := s.hub.Connected()
-	kiosks := make([]KioskResponse, 0, len(connected))
-	for _, id := range connected {
-		k, err := s.db.GetKioskByID(r.Context(), id)
-		if err == nil {
-			kiosks = append(kiosks, KioskResponse{ID: k.ID, Name: k.Name})
-		}
-	}
-
+	connected := s.sessions.Connected()
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(kiosks)
+	_ = json.NewEncoder(w).Encode(connected)
 }

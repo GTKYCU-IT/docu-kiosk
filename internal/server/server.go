@@ -1,4 +1,4 @@
-// Package server wires together the database, hub, routes, and HTTP lifecycle.
+// Package server wires together the database, sessions, routes, and HTTP lifecycle.
 package server
 
 import (
@@ -15,14 +15,14 @@ import (
 
 	"github.com/calvertjadon/docu-kiosk/internal/auth"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
-	"github.com/calvertjadon/docu-kiosk/internal/hub"
+	"github.com/calvertjadon/docu-kiosk/internal/session"
 	"github.com/felixge/httpsnoop"
 	"github.com/google/uuid"
 )
 
 type server struct {
 	db         *database.Queries
-	hub        *hub.Hub
+	sessions   *session.Manager
 	httpServer *http.Server
 	logger     *slog.Logger
 	port       int
@@ -57,11 +57,12 @@ func (s *server) ensureAdminUser() {
 }
 
 func NewServer(port int, db *database.Queries) (server, error) {
+	logger := newLogger()
 	s := server{
-		db:     db,
-		hub:    hub.New(),
-		port:   port,
-		logger: newLogger(),
+		db:         db,
+		sessions:   session.NewManager(logger),
+		port:       port,
+		logger:     logger,
 	}
 
 	s.ensureAdminUser()
