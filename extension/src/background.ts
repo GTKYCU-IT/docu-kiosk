@@ -74,7 +74,7 @@ export async function handleBypass(url: string) {
     const rules = buildBypassRules(tab.id, nextBypassRuleId)
     nextBypassRuleId += 2
 
-    await chrome.declarativeNetRequest.updateDynamicRules({ addRules: rules })
+    await chrome.declarativeNetRequest.updateSessionRules({ addRules: rules })
     bypassRuleIds.set(tab.id, ruleIds)
 
     await chrome.tabs.update(tab.id, { url, active: true })
@@ -88,28 +88,20 @@ function removeBypassRules(tabId: number) {
   const ruleIds = bypassRuleIds.get(tabId)
   if (!ruleIds) return
   bypassRuleIds.delete(tabId)
-  void chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: ruleIds })
+  void chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds })
 }
 
 
 export async function installRules() {
   try {
-    // Sweep all intercept rules (IDs 1-4) and any stale bypass rules (100+)
-    // from a prior service-worker run that ended without onRemoved firing.
+    // Sweep all intercept rules (IDs 1-4) from any prior service-worker run
+    // that left them behind, then install the current set.  Bypass rules are
+    // session-scoped and auto-clear on browser restart, so no sweep needed.
     const rules = buildRules(chrome.runtime.getURL('src/intercepted/index.html'))
     await chrome.declarativeNetRequest.updateDynamicRules({
       removeRuleIds: ALL_RULE_IDS,
       addRules: rules
     })
-    // Clean up any stale bypass rules (100+) left over from a previous
-    // service-worker instance that terminated without onRemoved firing.
-    const existing = await chrome.declarativeNetRequest.getDynamicRules()
-    const staleBypassIds = existing
-      .map((r) => r.id)
-      .filter((id) => id >= BYPASS_RULE_START_ID)
-    if (staleBypassIds.length > 0) {
-      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: staleBypassIds })
-    }
   } catch (err) {
     // A rejected install (e.g. an oversized regex) used to fail silently and
     // disable interception with no trace — surface it in the SW console.
