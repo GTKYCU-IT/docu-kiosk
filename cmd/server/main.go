@@ -22,9 +22,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	adminUsername := os.Getenv("AUTH_USERNAME")
-	adminPassword := os.Getenv("AUTH_PASSWORD")
-
 	if err := os.MkdirAll("./data", 0o755); err != nil {
 		slog.Error("create data dir", "error", err)
 		os.Exit(1)
@@ -50,7 +47,7 @@ func main() {
 	queries := database.New(db)
 	authModule := auth.NewAuthModule(queries, jwtKey)
 
-	srv, err := server.NewServer(8080, queries, authModule, adminUsername, adminPassword)
+	srv, err := server.NewServer(8080, queries, authModule)
 	if err != nil {
 		slog.Error("create server", "error", err)
 		os.Exit(1)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,14 +17,14 @@ import (
 	"github.com/calvertjadon/docu-kiosk/internal/auth"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
+	serverauth "github.com/calvertjadon/docu-kiosk/internal/server/auth"
+	"github.com/calvertjadon/docu-kiosk/internal/server/kiosk"
 	"github.com/felixge/httpsnoop"
 	"github.com/google/uuid"
 )
 
-type server struct {
-	db         *database.Queries
-	hub        *hub.Hub
-	authModule *auth.AuthModule
+// Server holds the HTTP lifecycle, logger, and composed route groups.
+type Server struct {
 	httpServer *http.Server
 	logger     *slog.Logger
 	port       int
@@ -37,71 +38,80 @@ func newLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 }
 
-func (s *server) ensureAdminUser(username, password string) {
-	if username == "" || password == "" {
-		slog.Error("AUTH_USERNAME and AUTH_PASSWORD are required when the users table is empty")
-		os.Exit(1)
+// realIP extracts the client IP from X-Forwarded-For or RemoteAddr.
+func realIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if before, _, found := strings.Cut(xff, ","); found {
+			return strings.TrimSpace(before)
+		}
+		return strings.TrimSpace(xff)
 	}
-
-	hash, err := auth.HashPassword(password)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if _, err := s.db.CreateUser(context.Background(), database.CreateUserParams{
-		ID:       uuid.New(),
-		Username: username,
-		Password: hash,
-	}); err != nil {
-		log.Fatal(err)
-	}
-
-	slog.Info("created admin user successfully", "username", username)
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	return ip
 }
 
-func NewServer(port int, db *database.Queries, authModule *auth.AuthModule, adminUsername, adminPassword string) (server, error) {
-	s := server{
-		db:         db,
-		hub:        hub.New(),
-		authModule: authModule,
-		port:       port,
-		logger:     newLogger(),
+func ensureAdminUser(db *database.Queries) {
+	if _, err := db.GetUserByUsername(context.Background(), "admin"); err != nil {
+		hash, err := auth.HashPassword("admin")
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if _, err = db.CreateUser(context.Background(), database.CreateUserParams{
+			ID:       uuid.New(),
+			Username: "admin",
+			Password: hash,
+		}); err != nil {
+			log.Fatal(err)
+		}
+
+		slog.Info("created admin user successfully")
 	}
-	count, err := db.CountUsers(context.Background())
-	if err != nil {
-		return server{}, fmt.Errorf("count users: %w", err)
-	}
-	if count == 0 {
-		slog.Info("users table is empty, ensuring admin user exists")
-		s.ensureAdminUser(adminUsername, adminPassword)
-	} else {
-		slog.Info("users table has existing users, skipping admin creation")
-	}
+}
+
+// NewServer creates a Server with all route groups wired.
+func NewServer(port int, db *database.Queries, authModule *auth.AuthModule) (*Server, error) {
+	logger := newLogger()
+
+	ensureAdminUser(db)
+
+	kioskHandlers := kiosk.NewHandlers(db, hub.New(), logger)
+	authHandlers := serverauth.NewHandlers(authModule)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /protected", s.ensureAuthMiddlware(s.handleProtected))
-	mux.HandleFunc("POST /login", s.handleLogin)
-	mux.HandleFunc("POST /refresh", s.handleRefresh)
+	mux.HandleFunc("POST /login", authHandlers.Login)
+	mux.HandleFunc("POST /refresh", authHandlers.Refresh)
 
-	mux.HandleFunc("POST /api/kiosks", s.handleRegister)
-	mux.HandleFunc("GET /api/kiosks", s.handleListKiosks)
-	mux.HandleFunc("POST /api/kiosks/{id}/sessions", s.handlePush)
-	mux.HandleFunc("/ws", s.handleWS)
+	// Example authenticated endpoint.
+	mux.HandleFunc("GET /protected", authHandlers.AuthMiddleware(
+		func(w http.ResponseWriter, r *http.Request, user database.User) {
+			w.WriteHeader(http.StatusOK)
+		},
+	))
+
+	mux.HandleFunc("POST /api/kiosks", kioskHandlers.Register)
+	mux.HandleFunc("GET /api/kiosks", kioskHandlers.List)
+	mux.HandleFunc("POST /api/kiosks/{id}/sessions", kioskHandlers.Push)
+	mux.HandleFunc("/ws", kioskHandlers.WS)
 
 	mux.Handle("/", http.FileServer(http.Dir("./web/dist")))
 
-	s.httpServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: corsMiddleware(s.loggingMiddleware(mux)),
+	s := &Server{
+		port:   port,
+		logger: logger,
+		httpServer: &http.Server{
+			Addr:    fmt.Sprintf(":%d", port),
+			Handler: corsMiddleware(loggingMiddleware(logger, mux)),
+		},
 	}
 
 	return s, nil
 }
 
-func (s *server) loggingMiddleware(next http.Handler) http.Handler {
+func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m := httpsnoop.CaptureMetrics(next, w, r)
-		s.logger.Info(
+		logger.Info(
 			"request",
 			"method", r.Method,
 			"path", r.URL.Path,
@@ -128,7 +138,8 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func (s *server) Start() error {
+// Start begins listening and blocks until SIGINT/SIGTERM.
+func (s *Server) Start() error {
 	s.logger.Info("starting server", "port", s.port)
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
