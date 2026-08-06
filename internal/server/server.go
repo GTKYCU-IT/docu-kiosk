@@ -78,7 +78,7 @@ func NewServer(port int, db *database.Queries) (server, error) {
 
 	mux.Handle("/", http.FileServer(http.Dir("./web/dist")))
 
-	cors := newCORSConfig()
+	cors := newCORSConfig(s.logger)
 	s.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
 		Handler: s.loggingMiddleware(cors.middleware(mux)),
@@ -102,22 +102,38 @@ func (s *server) loggingMiddleware(next http.Handler) http.Handler {
 }
 
 type corsConfig struct {
-	allowedOrigins []string // exact origins or scheme-only ("chrome-extension://") for prefix match
+	allowedOrigins []string // full origins matched exactly, except "chrome-extension://" which is a prefix
 }
 
-func newCORSConfig() *corsConfig {
-	if raw := os.Getenv("CORS_ORIGINS"); raw != "" {
+// newCORSConfig reads CORS_ORIGINS (comma-separated).  Entries without a
+// scheme (bare hostnames) get https:// prepended automatically.  The only
+// origin that matches by prefix is "chrome-extension://"; any other
+// scheme-only entry is rejected with a warning.
+func newCORSConfig(logger *slog.Logger) *corsConfig {
+	if raw := strings.TrimSpace(os.Getenv("CORS_ORIGINS")); raw != "" {
 		origins := strings.Split(raw, ",")
 		trimmed := make([]string, 0, len(origins))
 		for _, o := range origins {
-			if t := strings.TrimSpace(o); t != "" {
-				trimmed = append(trimmed, t)
+			t := strings.TrimSpace(o)
+			if t == "" {
+				continue
 			}
+			if !strings.Contains(t, "://") {
+				// Bare hostname — assume https.
+				t = "https://" + t
+			} else if strings.HasSuffix(t, "://") && t != "chrome-extension://" {
+				logger.Warn("cors: ignoring scheme-only origin (only chrome-extension:// is supported for prefix matching)", "entry", o)
+				continue
+			}
+			trimmed = append(trimmed, t)
 		}
-		return &corsConfig{allowedOrigins: trimmed}
+		if len(trimmed) > 0 {
+			return &corsConfig{allowedOrigins: trimmed}
+		}
+		// All entries were blank or invalid — fall through to defaults.
 	}
 
-	// Sensible defaults when CORS_ORIGINS is not set.
+	// Defaults when CORS_ORIGINS is not set.
 	var origins []string
 	// Any Chrome extension — the extension ID is random per build, so we
 	// match by scheme prefix.  Operators who need tighter control should
@@ -132,8 +148,7 @@ func newCORSConfig() *corsConfig {
 
 func (c *corsConfig) isAllowed(origin string) bool {
 	for _, allowed := range c.allowedOrigins {
-		if strings.HasSuffix(allowed, "://") {
-			// Scheme-only entries use prefix matching (e.g. "chrome-extension://").
+		if allowed == "chrome-extension://" {
 			if strings.HasPrefix(origin, allowed) {
 				return true
 			}
@@ -148,18 +163,25 @@ func (c *corsConfig) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
-			// No Origin header — not a cross-origin request; pass through.
+			// No Origin header — not a cross-origin request (same-origin
+			// or non-browser client); pass through.
 			next.ServeHTTP(w, r)
 			return
 		}
 		w.Header().Set("Vary", "Origin")
 		if !c.isAllowed(origin) {
+			// Fail closed: no Access-Control-Allow-Origin, browser
+			// blocks the response.  This also gates the /ws upgrade
+			// path — browsers always send Origin on WebSocket
+			// handshakes, so a kiosk SPA served from an unlisted
+			// origin will be rejected here before the upgrade.
+			slog.Warn("cors: rejected origin", "origin", origin, "method", r.Method, "path", r.URL.Path)
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
