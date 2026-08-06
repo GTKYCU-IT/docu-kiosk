@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/calvertjadon/docu-kiosk/internal/database"
-	"github.com/calvertjadon/docu-kiosk/internal/hub"
+	"github.com/calvertjadon/docu-kiosk/internal/session"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/pressly/goose/v3"
@@ -52,7 +52,7 @@ func testLogger() *slog.Logger {
 func setupTestHandlers(t *testing.T) (*Handlers, *httptest.Server) {
 	t.Helper()
 	db := newTestDB(t)
-	h := NewHandlers(db, hub.New(), testLogger())
+	h := NewHandlers(db, session.NewManager(testLogger()), testLogger())
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/kiosks", h.Register)
 	mux.HandleFunc("GET /api/kiosks", h.List)
@@ -245,8 +245,8 @@ func TestWSConnectsWhenRegistered(t *testing.T) {
 	registerKiosk(t, ts, "lobby")
 	connectWS(t, ts)
 
-	if len(h.hub.Connected()) != 1 {
-		t.Errorf("expected 1 connected kiosk, got %v", h.hub.Connected())
+	if len(h.sessions.Connected()) != 1 {
+		t.Errorf("expected 1 connected kiosk, got %v", h.sessions.Connected())
 	}
 }
 
@@ -257,7 +257,7 @@ func TestWSDisconnectRemovesFromHub(t *testing.T) {
 	conn, _ := connectWS(t, ts)
 	conn.CloseNow()
 
-	waitFor(t, func() bool { return len(h.hub.Connected()) == 0 })
+	waitFor(t, func() bool { return len(h.sessions.Connected()) == 0 })
 }
 
 func TestWSReconnect(t *testing.T) {
@@ -266,10 +266,10 @@ func TestWSReconnect(t *testing.T) {
 
 	conn, _ := connectWS(t, ts)
 	conn.CloseNow()
-	waitFor(t, func() bool { return len(h.hub.Connected()) == 0 })
+	waitFor(t, func() bool { return len(h.sessions.Connected()) == 0 })
 
 	connectWS(t, ts)
-	waitFor(t, func() bool { return len(h.hub.Connected()) == 1 })
+	waitFor(t, func() bool { return len(h.sessions.Connected()) == 1 })
 }
 
 // --- Push ---
@@ -385,7 +385,7 @@ func TestRegisterThenConnect(t *testing.T) {
 		t.Errorf("expected name lobby from connected message, got %q", name)
 	}
 
-	if len(h.hub.Connected()) != 1 {
-		t.Errorf("expected 1 kiosk in hub, got %v", h.hub.Connected())
+	if len(h.sessions.Connected()) != 1 {
+		t.Errorf("expected 1 kiosk in sessions, got %v", h.sessions.Connected())
 	}
 }

@@ -1,4 +1,4 @@
-// Package server wires together the database, hub, routes, and HTTP lifecycle.
+// Package server wires together the database, sessions, routes, and HTTP lifecycle.
 package server
 
 import (
@@ -16,7 +16,7 @@ import (
 
 	"github.com/calvertjadon/docu-kiosk/internal/auth"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
-	"github.com/calvertjadon/docu-kiosk/internal/hub"
+	"github.com/calvertjadon/docu-kiosk/internal/session"
 	serverauth "github.com/calvertjadon/docu-kiosk/internal/server/auth"
 	"github.com/calvertjadon/docu-kiosk/internal/server/kiosk"
 	"github.com/felixge/httpsnoop"
@@ -75,7 +75,7 @@ func NewServer(port int, db *database.Queries, authModule *auth.AuthModule) (*Se
 
 	ensureAdminUser(db)
 
-	kioskHandlers := kiosk.NewHandlers(db, hub.New(), logger)
+	kioskHandlers := kiosk.NewHandlers(db, session.NewManager(logger), logger)
 	authHandlers := serverauth.NewHandlers(authModule)
 
 	mux := http.NewServeMux()
