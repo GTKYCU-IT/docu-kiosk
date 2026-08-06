@@ -29,9 +29,9 @@ Add a **bypass** button to the intercepted page that opens the intercepted URL i
 
 When the user clicks the bypass button on the intercepted page, `App.svelte` sends a message (`{ type: "bypass", url }`) to the service worker via `chrome.runtime.sendMessage`. The service worker:
 
-1. Creates a blank tab (`about:blank`) to obtain a stable `tabId`.
+1. Creates a blank tab (`about:blank`) without activating it, to obtain a stable `tabId`.
 2. Installs a tab-scoped `allow` DNR rule (`action: "allow"`, `priority: 100`, `condition.tabIds: [tabId]`) with a dynamically allocated rule ID starting at 100.
-3. Navigates the blank tab to the intercepted URL via `chrome.tabs.update(tabId, { url })`.
+3. Navigates the blank tab to the intercepted URL and activates it in a single `chrome.tabs.update(tabId, { url, active: true })` call.
 
 The allow rule matches DocuSign hosts (`*.docusign.net` and `*.docusign.com`), has priority 100 (above the intercept rules at priority 1), and is scoped to the single tab via `condition.tabIds`. Because `tabId` is stable across redirects and subsequent same-tab navigations, the entire DocuSign session within that tab is protected from re-interception.
 
@@ -119,7 +119,7 @@ Extensions to `background.test.ts`:
 
 ## Further Notes
 
-- The `tabs` permission is not required additionally — `chrome.tabs.create` is already used in the toolbar action handler.
+- The `tabs` permission is required for `chrome.tabs.update` with `active: true` (only `url` and `muted` are exempt for extension-created tabs). The extension declares it in the manifest.
 - The `ExternalLink` icon is already available via `@lucide/svelte` (no new dependency).
 - The `copyPendingUrl()` function already exists in `App.svelte` — reused for the failure fallback.
 - If DocuSign adds a 5th signing URL pattern, it would use rule ID 5, and the bypass sweep (IDs 100+) remains unaffected.

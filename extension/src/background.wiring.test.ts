@@ -198,7 +198,7 @@ describe('bypass message handler', () => {
   it('creates a blank tab, installs bypass rules, and navigates to the URL', async () => {
     await handleBypass(testUrl)
 
-    expect(tabsCreate).toHaveBeenCalledWith({ url: 'about:blank', active: true })
+    expect(tabsCreate).toHaveBeenCalledWith({ url: 'about:blank', active: false })
 
     const rulesCall = updateDynamicRules.mock.calls.find(
       (c) => c[0].addRules?.length > 0
@@ -211,7 +211,7 @@ describe('bypass message handler', () => {
     expect(added[0].condition.tabIds).toEqual([99])
     expect(added[1].condition.tabIds).toEqual([99])
 
-    expect(tabsUpdate).toHaveBeenCalledWith(99, { url: testUrl })
+    expect(tabsUpdate).toHaveBeenCalledWith(99, { url: testUrl, active: true })
   })
 
   it('handles bypass via the runtime.onMessage listener', async () => {

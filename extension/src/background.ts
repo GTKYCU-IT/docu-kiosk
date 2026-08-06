@@ -57,7 +57,7 @@ export function buildBypassRules(tabId: number, startId: number): chrome.declara
 
 export async function handleBypass(url: string) {
   try {
-    const tab = await chrome.tabs.create({ url: 'about:blank', active: true })
+    const tab = await chrome.tabs.create({ url: 'about:blank', active: false })
     if (!tab.id) throw new Error('tab has no id')
 
     const ruleIds = [nextBypassRuleId, nextBypassRuleId + 1]
@@ -67,7 +67,7 @@ export async function handleBypass(url: string) {
     await chrome.declarativeNetRequest.updateDynamicRules({ addRules: rules })
     bypassRuleIds.set(tab.id, ruleIds)
 
-    await chrome.tabs.update(tab.id, { url })
+    await chrome.tabs.update(tab.id, { url, active: true })
   } catch (err) {
     console.error('[docu-kiosk] bypass failed:', err)
     throw err
