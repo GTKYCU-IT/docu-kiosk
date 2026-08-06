@@ -78,9 +78,10 @@ func NewServer(port int, db *database.Queries) (server, error) {
 
 	mux.Handle("/", http.FileServer(http.Dir("./web/dist")))
 
+	cors := newCORSConfig()
 	s.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
-		Handler: corsMiddleware(s.loggingMiddleware(mux)),
+		Handler: s.loggingMiddleware(cors.middleware(mux)),
 	}
 
 	return s, nil
@@ -100,14 +101,65 @@ func (s *server) loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
+type corsConfig struct {
+	allowedOrigins []string // exact origins or scheme-only ("chrome-extension://") for prefix match
+}
+
+func newCORSConfig() *corsConfig {
+	if raw := os.Getenv("CORS_ORIGINS"); raw != "" {
+		origins := strings.Split(raw, ",")
+		trimmed := make([]string, 0, len(origins))
+		for _, o := range origins {
+			if t := strings.TrimSpace(o); t != "" {
+				trimmed = append(trimmed, t)
+			}
+		}
+		return &corsConfig{allowedOrigins: trimmed}
+	}
+
+	// Sensible defaults when CORS_ORIGINS is not set.
+	var origins []string
+	// Any Chrome extension — the extension ID is random per build, so we
+	// match by scheme prefix.  Operators who need tighter control should
+	// set CORS_ORIGINS to the exact chrome-extension://<id> of their CRX.
+	origins = append(origins, "chrome-extension://")
+	// Same-origin SPA served by the broker — exact match.
+	if host := os.Getenv("BROKER_HOST"); host != "" {
+		origins = append(origins, "https://"+host)
+	}
+	return &corsConfig{allowedOrigins: origins}
+}
+
+func (c *corsConfig) isAllowed(origin string) bool {
+	for _, allowed := range c.allowedOrigins {
+		if strings.HasSuffix(allowed, "://") {
+			// Scheme-only entries use prefix matching (e.g. "chrome-extension://").
+			if strings.HasPrefix(origin, allowed) {
+				return true
+			}
+		} else if origin == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *corsConfig) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if origin == "" {
+			// No Origin header — not a cross-origin request; pass through.
+			next.ServeHTTP(w, r)
+			return
 		}
+		w.Header().Set("Vary", "Origin")
+		if !c.isAllowed(origin) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
