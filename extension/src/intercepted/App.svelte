@@ -139,15 +139,6 @@
         <p class="text-sm text-muted-foreground">{status || 'No kiosks are connected. Waiting…'}</p>
       {/if}
 
-      {#if pendingUrl}
-        <Button
-          variant="ghost"
-          class="w-full justify-start"
-          onclick={bypass}
-        >
-          <ExternalLink class="mr-2 size-4" />Open in browser
-        </Button>
-      {/if}
 
       <details class="mt-4 rounded-md border p-2">
         <summary class="cursor-pointer select-none text-xs text-muted-foreground">Original URL</summary>
@@ -162,6 +153,16 @@
           </Button>
         </div>
       </details>
+
+      {#if pendingUrl}
+        <Button
+          variant="ghost"
+          class="w-full justify-start"
+          onclick={bypass}
+        >
+          <ExternalLink class="mr-2 size-4" />Open in browser
+        </Button>
+      {/if}
     </CardContent>
   </Card>
 </div>
