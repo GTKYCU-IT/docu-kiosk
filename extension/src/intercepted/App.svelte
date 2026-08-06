@@ -81,18 +81,23 @@
       try {
         const response = await chrome.runtime.sendMessage({ type: 'bypass', url: pendingUrl })
         if (response?.error) {
+          const msg = `Bypass failed: ${response.error}`
+          console.error('[docu-kiosk]', msg)
           await copyPendingUrl()
-          toast.error('Could not open in browser. The URL has been copied to your clipboard.')
+          toast.error(msg)
           return
         }
-        return // success
+        return // success — the tab will open
       } catch (err) {
+        // sendMessage itself failed — SW may not be running yet
+        console.warn('[docu-kiosk] sendMessage attempt %d failed: %o', attempt + 1, err)
         if (attempt < 2) {
           await new Promise(r => setTimeout(r, 300 * (attempt + 1)))
         }
       }
     }
     // All retries exhausted
+    console.error('[docu-kiosk] bypass: all sendMessage attempts failed')
     await copyPendingUrl()
     toast.error('Could not open in browser. The URL has been copied to your clipboard.')
   }
