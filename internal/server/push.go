@@ -2,8 +2,11 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
+	"github.com/calvertjadon/docu-kiosk/internal/hub"
+	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/google/uuid"
 )
 
@@ -23,10 +26,15 @@ func (s *server) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg := map[string]string{"type": "sign", "url": body.URL}
+	msg := protocol.NewSign(body.URL)
 	if err := s.hub.Send(r.Context(), kioskID, msg); err != nil {
-		s.logger.Warn("push failed: kiosk not connected", "kiosk_id", kioskID)
-		http.Error(w, "kiosk not connected", http.StatusNotFound)
+		if errors.Is(err, hub.ErrNotConnected) {
+			s.logger.Warn("push failed: kiosk not connected", "kiosk_id", kioskID)
+			http.Error(w, "kiosk not connected", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("push failed", "error", err, "kiosk_id", kioskID)
+		http.Error(w, "push failed", http.StatusInternalServerError)
 		return
 	}
 

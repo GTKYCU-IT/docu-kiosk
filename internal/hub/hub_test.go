@@ -3,12 +3,14 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"sync"
 	"testing"
 
+	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 )
@@ -112,11 +114,7 @@ func TestSend(t *testing.T) {
 	h := New()
 	id := h.Register(uuid.New(), serverConn)
 
-	type Msg struct {
-		Type string `json:"type"`
-		URL  string `json:"url"`
-	}
-	want := Msg{Type: "sign", URL: "https://docusign.example.com/signing/abc123"}
+	want := protocol.NewSign("https://docusign.example.com/signing/abc123")
 
 	if err := h.Send(context.Background(), id, want); err != nil {
 		t.Fatalf("send: %v", err)
@@ -127,7 +125,7 @@ func TestSend(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 
-	var got Msg
+	var got protocol.Sign
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -138,8 +136,12 @@ func TestSend(t *testing.T) {
 
 func TestSendToUnconnected(t *testing.T) {
 	h := New()
-	if err := h.Send(context.Background(), uuid.New(), "hello"); err == nil {
+	err := h.Send(context.Background(), uuid.New(), protocol.NewSign("https://example.com"))
+	if err == nil {
 		t.Error("expected error sending to unconnected kiosk")
+	}
+	if !errors.Is(err, ErrNotConnected) {
+		t.Errorf("expected ErrNotConnected, got %v", err)
 	}
 }
 

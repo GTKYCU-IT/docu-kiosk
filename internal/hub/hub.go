@@ -3,13 +3,17 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 
+	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 )
+
+// ErrNotConnected is returned when sending to a kiosk with no live session.
+var ErrNotConnected = errors.New("kiosk not connected")
 
 type Hub struct {
 	mu       sync.RWMutex
@@ -36,8 +40,8 @@ func (h *Hub) Unregister(id uuid.UUID) {
 	delete(h.sessions, id)
 }
 
-func (h *Hub) Send(ctx context.Context, id uuid.UUID, msg any) error {
-	data, err := json.Marshal(msg)
+func (h *Hub) Send(ctx context.Context, id uuid.UUID, msg protocol.Message) error {
+	data, err := protocol.Marshal(msg)
 	if err != nil {
 		return err
 	}
@@ -47,7 +51,7 @@ func (h *Hub) Send(ctx context.Context, id uuid.UUID, msg any) error {
 	h.mu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("kiosk %s not connected", id)
+		return fmt.Errorf("%w: %s", ErrNotConnected, id)
 	}
 
 	return conn.Write(ctx, websocket.MessageText, data)
