@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -14,14 +15,25 @@ import (
 	"testing"
 	"time"
 
-	"github.com/calvertjadon/docu-kiosk/internal/auth"
+	"github.com/calvertjadon/docu-kiosk/internal/config"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
-	"github.com/calvertjadon/docu-kiosk/internal/hub"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
+
+// testConfig returns the baseline Config used by every server test: the
+// broker is built exactly like production (NewServer) with dev credentials.
+func testConfig() config.Config {
+	return config.Config{
+		Port:          0,
+		TokenSecret:   []byte("0123456789abcdef0123456789abcdef"),
+		AdminUsername: "admin",
+		AdminPassword: "admin1234",
+		LogLevel:      slog.LevelInfo,
+	}
+}
 
 func newTestDB(t *testing.T) *database.Queries {
 	t.Helper()
@@ -48,29 +60,11 @@ func newTestDB(t *testing.T) *database.Queries {
 func setupTestServer(t *testing.T) (*server, *httptest.Server) {
 	t.Helper()
 	db := newTestDB(t)
-	authModule, err := auth.NewAuthModule(db, []byte("0123456789abcdef0123456789abcdef"))
+	s, err := NewServer(testConfig(), db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &server{
-		db:         db,
-		hub:        hub.New(),
-		authModule: authModule,
-		logger:     newLogger(),
-	}
-	if err := s.ensureAdminUser("admin", "admin1234"); err != nil {
-		t.Fatal(err)
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /protected", s.ensureAuthMiddleware(s.handleProtected))
-	mux.HandleFunc("POST /login", s.handleLogin)
-	mux.HandleFunc("POST /refresh", s.handleRefresh)
-	mux.HandleFunc("GET /api/version", s.handleVersion)
-	mux.HandleFunc("POST /api/kiosks", s.handleRegister)
-	mux.HandleFunc("GET /api/kiosks", s.handleListKiosks)
-	mux.HandleFunc("POST /api/kiosks/{id}/sessions", s.handlePush)
-	mux.HandleFunc("/ws", s.handleWS)
-	ts := httptest.NewServer(mux)
+	ts := httptest.NewServer(s.httpServer.Handler)
 	t.Cleanup(ts.Close)
 	return s, ts
 }

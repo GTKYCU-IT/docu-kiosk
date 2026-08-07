@@ -1,31 +1,31 @@
 package server
 
 import (
-	"io"
-	"log/slog"
 	"net/http/httptest"
-	"net/netip"
+	"strings"
 	"testing"
+
+	"github.com/calvertjadon/docu-kiosk/internal/config"
 )
 
-func realIPTestServer(trusted ...string) *server {
-	s := &server{
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+func realIPTestServer(t *testing.T, trusted ...string) *server {
+	t.Helper()
+	cfg := testConfig()
+	prefixes, err := config.ParseTrustedProxies(strings.Join(trusted, ","))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, entry := range trusted {
-		if p, err := netip.ParsePrefix(entry); err == nil {
-			s.trustedProxies = append(s.trustedProxies, p)
-			continue
-		}
-		if ip, err := netip.ParseAddr(entry); err == nil {
-			s.trustedProxies = append(s.trustedProxies, netip.PrefixFrom(ip, ip.BitLen()))
-		}
+	cfg.TrustedProxies = prefixes
+	db := newTestDB(t)
+	s, err := NewServer(cfg, db)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return s
 }
 
 func TestRealIPUsesRemoteAddrWhenNoXFF(t *testing.T) {
-	s := realIPTestServer("127.0.0.1")
+	s := realIPTestServer(t, "127.0.0.1")
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "192.168.1.50:54321"
 
@@ -35,7 +35,7 @@ func TestRealIPUsesRemoteAddrWhenNoXFF(t *testing.T) {
 }
 
 func TestRealIPIgnoresXFFFromUntrustedPeer(t *testing.T) {
-	s := realIPTestServer("10.0.0.1")
+	s := realIPTestServer(t, "10.0.0.1")
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "192.168.1.50:54321"
 	req.Header.Set("X-Forwarded-For", "10.9.9.9")
@@ -46,7 +46,7 @@ func TestRealIPIgnoresXFFFromUntrustedPeer(t *testing.T) {
 }
 
 func TestRealIPIgnoresXFFWhenNoProxiesConfigured(t *testing.T) {
-	s := realIPTestServer()
+	s := realIPTestServer(t)
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "172.16.0.9:1234"
 	req.Header.Set("X-Forwarded-For", "203.0.113.7")
@@ -57,7 +57,7 @@ func TestRealIPIgnoresXFFWhenNoProxiesConfigured(t *testing.T) {
 }
 
 func TestRealIPUsesRightmostXFFFromTrustedPeer(t *testing.T) {
-	s := realIPTestServer("127.0.0.1")
+	s := realIPTestServer(t, "127.0.0.1")
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "127.0.0.1:8080"
 	// Client-supplied XFF plus the proxy's appended entry: only the proxy's
@@ -70,7 +70,7 @@ func TestRealIPUsesRightmostXFFFromTrustedPeer(t *testing.T) {
 }
 
 func TestRealIPTrustsProxyByCIDR(t *testing.T) {
-	s := realIPTestServer("10.0.0.0/8")
+	s := realIPTestServer(t, "10.0.0.0/8")
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "10.1.2.3:9999"
 	req.Header.Set("X-Forwarded-For", "198.51.100.23")
@@ -81,7 +81,7 @@ func TestRealIPTrustsProxyByCIDR(t *testing.T) {
 }
 
 func TestRealIPToleratesMissingPort(t *testing.T) {
-	s := realIPTestServer("127.0.0.1")
+	s := realIPTestServer(t, "127.0.0.1")
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "192.168.1.5"
 

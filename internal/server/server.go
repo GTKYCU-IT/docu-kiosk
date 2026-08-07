@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/calvertjadon/docu-kiosk/internal/auth"
+	"github.com/calvertjadon/docu-kiosk/internal/config"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
 	"github.com/calvertjadon/docu-kiosk/internal/version"
@@ -34,41 +35,8 @@ type server struct {
 	trustedProxies []netip.Prefix
 }
 
-func newLogger() *slog.Logger {
-	level := slog.LevelInfo
-	if raw := strings.ToUpper(os.Getenv("LOG_LEVEL")); raw != "" {
-		_ = level.UnmarshalText([]byte(raw))
-	}
+func newLogger(level slog.Level) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
-}
-
-// newTrustedProxies parses TRUSTED_PROXIES (comma-separated IPs and/or CIDRs).
-// X-Forwarded-For is only honored when the direct peer of a request matches
-// one of these entries, so an untrusted client cannot spoof its IP.
-func newTrustedProxies(logger *slog.Logger) []netip.Prefix {
-	raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES"))
-	if raw == "" {
-		logger.Info("TRUSTED_PROXIES not set — X-Forwarded-For will be ignored, kiosk IPs resolve to the direct peer")
-		return nil
-	}
-
-	var prefixes []netip.Prefix
-	for _, entry := range strings.Split(raw, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		if p, err := netip.ParsePrefix(entry); err == nil {
-			prefixes = append(prefixes, p)
-			continue
-		}
-		if ip, err := netip.ParseAddr(entry); err == nil {
-			prefixes = append(prefixes, netip.PrefixFrom(ip, ip.BitLen()))
-			continue
-		}
-		logger.Warn("TRUSTED_PROXIES: ignoring invalid entry", "entry", entry)
-	}
-	return prefixes
 }
 
 func (s *server) trustedProxy(peer string) bool {
@@ -133,15 +101,24 @@ func (s *server) ensureAdminUser(username, password string) error {
 // NewServer builds the broker: routes, middleware chain, and the admin-user
 // bootstrap. The admin user is only created when the users table is empty, so
 // existing credentials are never silently reset.
-func NewServer(port int, db *database.Queries, authModule *auth.AuthModule, adminUsername, adminPassword string) (*server, error) {
-	logger := newLogger()
+func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
+	logger := newLogger(cfg.LogLevel)
+	if len(cfg.TrustedProxies) == 0 {
+		logger.Info("TRUSTED_PROXIES not set — X-Forwarded-For will be ignored, kiosk IPs resolve to the direct peer")
+	}
+
+	authModule, err := auth.NewAuthModule(db, cfg.TokenSecret)
+	if err != nil {
+		return nil, fmt.Errorf("init auth: %w", err)
+	}
+
 	s := &server{
 		db:             db,
 		hub:            hub.New(),
 		authModule:     authModule,
-		port:           port,
+		port:           cfg.Port,
 		logger:         logger,
-		trustedProxies: newTrustedProxies(logger),
+		trustedProxies: cfg.TrustedProxies,
 	}
 
 	count, err := db.CountUsers(context.Background())
@@ -150,7 +127,7 @@ func NewServer(port int, db *database.Queries, authModule *auth.AuthModule, admi
 	}
 	if count == 0 {
 		s.logger.Info("users table is empty — bootstrapping admin user")
-		if err := s.ensureAdminUser(adminUsername, adminPassword); err != nil {
+		if err := s.ensureAdminUser(cfg.AdminUsername, cfg.AdminPassword); err != nil {
 			return nil, err
 		}
 	} else {
@@ -171,8 +148,8 @@ func NewServer(port int, db *database.Queries, authModule *auth.AuthModule, admi
 	mux.Handle("/", http.FileServer(http.Dir("./web/dist")))
 
 	s.httpServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: newCORSConfig(s.logger).middleware(s.loggingMiddleware(mux)),
+		Addr:    fmt.Sprintf(":%d", cfg.Port),
+		Handler: newCORSConfig(cfg.CORSOrigins, logger).middleware(s.loggingMiddleware(mux)),
 	}
 
 	return s, nil
@@ -197,38 +174,19 @@ type corsConfig struct {
 	logger         *slog.Logger
 }
 
-// newCORSConfig reads CORS_ORIGINS (comma-separated). Entries without a
-// scheme (bare hostnames) get https:// prepended. The only origin that
-// matches by prefix is "chrome-extension://"; any other scheme-only entry
-// is rejected with a warning.
-func newCORSConfig(logger *slog.Logger) *corsConfig {
-	if raw := strings.TrimSpace(os.Getenv("CORS_ORIGINS")); raw != "" {
-		origins := strings.Split(raw, ",")
-		trimmed := make([]string, 0, len(origins))
-		for _, o := range origins {
-			t := strings.TrimSpace(o)
-			if t == "" {
-				continue
-			}
-			if !strings.Contains(t, "://") {
-				// Bare hostname — assume https.
-				t = "https://" + t
-			} else if strings.HasSuffix(t, "://") && t != "chrome-extension://" {
-				logger.Warn("cors: ignoring scheme-only origin (only chrome-extension:// is supported for prefix matching)", "entry", o)
-				continue
-			}
-			trimmed = append(trimmed, t)
-		}
-		if len(trimmed) > 0 {
-			return &corsConfig{allowedOrigins: trimmed, logger: logger}
+// newCORSConfig builds the CORS allowlist from the normalized origins parsed
+// by config.Load. An empty allowlist means CORS_ORIGINS was not configured,
+// so the default applies: any Chrome extension — the extension ID varies per
+// build.
+func newCORSConfig(origins []string, logger *slog.Logger) *corsConfig {
+	if len(origins) == 0 {
+		// Default: any Chrome extension — the extension ID varies per build.
+		return &corsConfig{
+			allowedOrigins: []string{"chrome-extension://"},
+			logger:         logger,
 		}
 	}
-
-	// Default: any Chrome extension — the extension ID varies per build.
-	return &corsConfig{
-		allowedOrigins: []string{"chrome-extension://"},
-		logger:         logger,
-	}
+	return &corsConfig{allowedOrigins: origins, logger: logger}
 }
 
 // isSameOrigin reports whether the Origin header belongs to the same origin
