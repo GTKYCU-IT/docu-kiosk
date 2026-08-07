@@ -7,6 +7,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -80,7 +81,7 @@ func NewServer(port int, db *database.Queries) (server, error) {
 
 	s.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
-		Handler: corsMiddleware(s.loggingMiddleware(mux)),
+		Handler: newCORSConfig(s.logger).middleware(s.loggingMiddleware(mux)),
 	}
 
 	return s, nil
@@ -100,14 +101,105 @@ func (s *server) loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
+type corsConfig struct {
+	allowedOrigins []string // full origins matched exactly, except "chrome-extension://" which is a prefix
+	logger         *slog.Logger
+}
+
+// newCORSConfig reads CORS_ORIGINS (comma-separated). Entries without a
+// scheme (bare hostnames) get https:// prepended. The only origin that
+// matches by prefix is "chrome-extension://"; any other scheme-only entry
+// is rejected with a warning.
+func newCORSConfig(logger *slog.Logger) *corsConfig {
+	if raw := strings.TrimSpace(os.Getenv("CORS_ORIGINS")); raw != "" {
+		origins := strings.Split(raw, ",")
+		trimmed := make([]string, 0, len(origins))
+		for _, o := range origins {
+			t := strings.TrimSpace(o)
+			if t == "" {
+				continue
+			}
+			if !strings.Contains(t, "://") {
+				// Bare hostname — assume https.
+				t = "https://" + t
+			} else if strings.HasSuffix(t, "://") && t != "chrome-extension://" {
+				logger.Warn("cors: ignoring scheme-only origin (only chrome-extension:// is supported for prefix matching)", "entry", o)
+				continue
+			}
+			trimmed = append(trimmed, t)
+		}
+		if len(trimmed) > 0 {
+			return &corsConfig{allowedOrigins: trimmed, logger: logger}
+		}
+	}
+
+	// Default: any Chrome extension — the extension ID varies per build.
+	return &corsConfig{
+		allowedOrigins: []string{"chrome-extension://"},
+		logger:         logger,
+	}
+}
+
+// isSameOrigin reports whether the Origin header belongs to the same origin
+// as the request itself. The kiosk SPA is served by the broker, so its
+// same-origin WebSocket handshake and API calls must pass even though the
+// exact http://host:port origin cannot be enumerated in the allowlist. The
+// scheme is ignored on purpose: behind a TLS-terminating proxy the browser's
+// Origin is https while the server sees plain http.
+func (c *corsConfig) isSameOrigin(origin string, r *http.Request) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return parsed.Host != "" && strings.EqualFold(parsed.Host, r.Host)
+}
+
+func (c *corsConfig) isAllowed(origin string, r *http.Request) bool {
+	if c.isSameOrigin(origin, r) {
+		return true
+	}
+	for _, allowed := range c.allowedOrigins {
+		if allowed == "chrome-extension://" {
+			if strings.HasPrefix(origin, allowed) {
+				return true
+			}
+		} else if origin == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *corsConfig) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin != "" {
+		if origin == "" {
+			// No Origin header — same-origin navigation or a non-browser
+			// client; there is nothing for CORS to gate.
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		w.Header().Set("Vary", "Origin")
+
+		if !c.isAllowed(origin, r) {
+			// Fail closed: no Access-Control-Allow-Origin, so the browser
+			// blocks the response. Browsers always send Origin on WebSocket
+			// handshakes, so an unlisted origin is rejected here before the
+			// upgrade.
+			if c.logger != nil {
+				c.logger.Warn("cors: rejected origin", "origin", origin, "method", r.Method, "path", r.URL.Path)
+			}
+			http.Error(w, "origin not allowed", http.StatusForbidden)
+			return
+		}
+
+		if !c.isSameOrigin(origin, r) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		}
+
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

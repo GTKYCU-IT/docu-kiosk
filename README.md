@@ -47,6 +47,8 @@ Load `extension/dist/` as an unpacked extension at `edge://extensions` → "Load
 
 The broker requires no environment variables. Kiosk registrations are persisted in `kiosks.db` (SQLite). Authentication is IP-based — no secrets or registration keys needed.
 
+Cross-origin requests fail closed. Same-origin requests (the kiosk SPA served by the broker) and `chrome-extension://` origins are always allowed; set `CORS_ORIGINS` (comma-separated, see `.env.example`) to allow additional cross-origin callers such as an admin UI on another host.
+
 Caddy runs independently on the server as a reverse proxy in front of the broker. See the [DevOps wiki](../../wiki/DevOps) for server configuration.
 
 ### Extension
