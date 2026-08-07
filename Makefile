@@ -8,6 +8,11 @@
 
 DB_PATH ?= ./kiosks.db
 
+# Broker build identity — injected via -ldflags. BROKER_VERSION is named to
+# avoid clashing with the release target's VERSION parameter.
+BROKER_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+BROKER_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+
 all: build
 
 ## Development
@@ -21,7 +26,9 @@ dev-broker: ## Start broker with air (hot-reload)
 	air
 
 run: ## Run broker with dev secrets (no hot-reload)
-	DOCU_KIOSK_TOKEN_SECRET=dev DOCU_KIOSK_REGISTRATION_KEY=dev go run ./cmd/server
+	DOCU_KIOSK_TOKEN_SECRET=dev-only-secret-change-me-in-prod-0123456789 \
+	AUTH_USERNAME=admin AUTH_PASSWORD=admin1234 \
+	go run ./cmd/server
 
 ## Testing
 test: ## Run Go tests
@@ -40,7 +47,7 @@ web: ## Build Vite frontend → web/dist/
 	cd web && npm run build
 
 server: web ## Build broker binary → tmp/server
-	go build -o tmp/server ./cmd/server
+	go build -ldflags "-X github.com/calvertjadon/docu-kiosk/internal/version.Version=$(BROKER_VERSION) -X github.com/calvertjadon/docu-kiosk/internal/version.Commit=$(BROKER_COMMIT)" -o tmp/server ./cmd/server
 
 extension: ## Build Chrome/Edge extension → extension/dist/
 	cd extension && npm run build

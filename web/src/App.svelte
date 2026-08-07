@@ -18,12 +18,24 @@
     | "waiting"
     | "signing";
 
-  // let view = $state<View>(!isStandalone ? "install" : "validating");
   let view = $state<View>("validating");
 
   let kioskName = $state("");
   let signingUrl = $state("");
   let signingInitialLoad = true;
+
+  // Broker build version, shown as a subtle footer label. Loaded silently:
+  // if the fetch fails there is nothing to show and the kiosk carries on.
+  let brokerVersion = $state("");
+
+  onMount(() => {
+    fetch("/api/version")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { version?: string } | null) => {
+        if (d?.version) brokerVersion = d.version;
+      })
+      .catch(() => {});
+  });
 
   function handleSigningLoad() {
     if (signingInitialLoad) {
@@ -78,6 +90,16 @@
 </script>
 
 <Toaster position="top-center" />
+
+<!-- Subtle build-version footer; hidden while signing so it never overlays
+     the DocuSign iframe, and on first-run/register screens. -->
+{#if brokerVersion && view !== "signing" && view !== "register" && view !== "install"}
+  <p
+    class="pointer-events-none fixed inset-x-0 bottom-1 z-10 text-center text-xs font-medium text-muted-foreground/40"
+  >
+    docu-kiosk {brokerVersion}
+  </p>
+{/if}
 
 {#if view === "install"}
   <AddToHomeScreen />

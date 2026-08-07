@@ -11,7 +11,18 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
-RUN CGO_ENABLED=0 go build -o server ./cmd/server
+ARG VERSION=dev
+ARG COMMIT=dev
+# Release builds pass VERSION/COMMIT explicitly; local builds fall back to
+# git describe when the checkout is available in the build context.
+RUN if [ "$VERSION" = "dev" ] && [ -d .git ]; then \
+      VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"; \
+      COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"; \
+    fi; \
+    CGO_ENABLED=0 go build -ldflags \
+      "-X github.com/calvertjadon/docu-kiosk/internal/version.Version=${VERSION} \
+       -X github.com/calvertjadon/docu-kiosk/internal/version.Commit=${COMMIT}" \
+      -o server ./cmd/server
 
 FROM alpine:3.22
 RUN addgroup -S app && adduser -S -G app app

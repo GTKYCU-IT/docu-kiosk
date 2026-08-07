@@ -2,24 +2,11 @@ package server
 
 import (
 	"encoding/json"
-	"net"
 	"net/http"
-	"strings"
 
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/google/uuid"
 )
-
-func realIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if before, _, found := strings.Cut(xff, ","); found {
-			return strings.TrimSpace(before)
-		}
-		return strings.TrimSpace(xff)
-	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	return ip
-}
 
 // POST /api/kiosks
 func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +25,7 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	kioskIP := realIP(r)
+	kioskIP := s.realIP(r)
 
 	_, err := s.db.CreateKiosk(r.Context(), database.CreateKioskParams{
 		ID:   uuid.New(),

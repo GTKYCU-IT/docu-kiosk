@@ -11,7 +11,7 @@ import (
 
 // GET /ws
 func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
-	kioskIP := realIP(r)
+	kioskIP := s.realIP(r)
 
 	k, err := s.db.GetKioskByIP(r.Context(), kioskIP)
 	if err != nil {

@@ -2,9 +2,8 @@ package server
 
 import (
 	"encoding/json"
-	"log/slog"
+	"errors"
 	"net/http"
-	"time"
 
 	"github.com/calvertjadon/docu-kiosk/internal/auth"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
@@ -12,23 +11,17 @@ import (
 
 type AuthenticatedHandler func(w http.ResponseWriter, r *http.Request, user database.User)
 
-func (s *server) ensureAuthMiddlware(handler AuthenticatedHandler) http.HandlerFunc {
+func (s *server) ensureAuthMiddleware(handler AuthenticatedHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tokenString, err := auth.GetBearerToken(r.Header)
 		if err != nil {
-			respondWithError(w, "invalid token", http.StatusBadRequest, err)
+			s.respondWithError(w, "missing bearer token", http.StatusUnauthorized, nil)
 			return
 		}
 
-		userID, err := auth.ValidateJWT(tokenString, s.jwtKey)
+		user, err := s.authModule.Validate(r.Context(), tokenString)
 		if err != nil {
-			respondWithError(w, "invalid token", http.StatusUnauthorized, err)
-			return
-		}
-
-		user, err := s.db.GetUser(r.Context(), userID)
-		if err != nil {
-			respondWithError(w, "invalid token", http.StatusUnauthorized, err)
+			s.respondWithError(w, "invalid token", http.StatusUnauthorized, nil)
 			return
 		}
 
@@ -36,114 +29,67 @@ func (s *server) ensureAuthMiddlware(handler AuthenticatedHandler) http.HandlerF
 	}
 }
 
+// handleProtected is the canonical authenticated-endpoint probe: it returns
+// 200 only when the bearer token is valid.
 func (s *server) handleProtected(w http.ResponseWriter, r *http.Request, user database.User) {
 	w.WriteHeader(http.StatusOK)
 }
 
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	params := struct {
+	defer r.Body.Close()
+
+	var params struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
-	}{}
-
+	}
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
-		respondWithError(w, "Missing username or password", http.StatusBadRequest, err)
-		func() { _ = r.Body.Close() }()
+		s.respondWithError(w, "invalid request body", http.StatusBadRequest, nil)
 		return
 	}
 
-	user, err := s.db.GetUserByUsername(r.Context(), params.Username)
+	jwt, refreshToken, err := s.authModule.Login(r.Context(), params.Username, params.Password)
 	if err != nil {
-		respondWithError(w, "Invalid credentials", http.StatusBadRequest, err)
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			// Deliberately no error detail: the response must be identical
+			// for unknown users and wrong passwords.
+			s.respondWithError(w, "invalid credentials", http.StatusUnauthorized, nil)
+			return
+		}
+		s.respondWithError(w, "login failed", http.StatusInternalServerError, err)
 		return
 	}
 
-	if !auth.CheckPasswordHash(params.Password, user.Password) {
-		respondWithError(w, "Invalid credentials", http.StatusBadRequest, nil)
-		return
-	}
-
-	tokenString, err := auth.GenerateJWT(user.ID, s.jwtKey, time.Second*15)
-	if err != nil {
-		respondWithError(w, "Token creation failed", http.StatusInternalServerError, err)
-		return
-	}
-
-	refreshToken, err := s.db.MakeRefreshToken(r.Context(), user.ID)
-	if err != nil {
-		respondWithError(w, "Refresh token creation failed", http.StatusInternalServerError, err)
-		return
-	}
-
-	respondWithJSON(w, http.StatusOK, struct {
+	s.respondWithJSON(w, http.StatusOK, struct {
 		JWT          string `json:"jwt"`
 		RefreshToken string `json:"refresh_token"`
 	}{
-		JWT:          tokenString,
-		RefreshToken: refreshToken.Token,
+		JWT:          jwt,
+		RefreshToken: refreshToken,
 	})
 }
 
 func (s *server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	refreshTokenString, err := auth.GetBearerToken(r.Header)
+	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
-		respondWithError(w, "failed to authenticate user", http.StatusUnauthorized, err)
+		s.respondWithError(w, "missing bearer token", http.StatusUnauthorized, nil)
 		return
 	}
 
-	rt, err := s.db.GetRefreshToken(r.Context(), refreshTokenString)
+	jwt, refreshToken, err := s.authModule.RotateRefresh(r.Context(), token)
 	if err != nil {
-		respondWithError(w, "failed to authenticate user", http.StatusUnauthorized, err)
+		if errors.Is(err, auth.ErrInvalidRefreshToken) {
+			s.respondWithError(w, "invalid refresh token", http.StatusUnauthorized, nil)
+			return
+		}
+		s.respondWithError(w, "refresh failed", http.StatusInternalServerError, err)
 		return
 	}
 
-	if isRevoked(rt) || isExpired(rt) {
-		respondWithError(w, "bad refresh token", http.StatusUnauthorized, err)
-		return
-	}
-
-	// issue new jwt
-
-	token, err := auth.GenerateJWT(rt.UserID, s.jwtKey, time.Second*15)
-	if err != nil {
-		respondWithError(w, "failed to create jwt", http.StatusInternalServerError, err)
-		return
-	}
-
-	// invalidate existing refresh token
-
-	if err := s.db.RevokeRefreshToken(r.Context(), rt.Token); err != nil {
-		respondWithError(w, "failed to revoke refresh token", http.StatusInternalServerError, err)
-		return
-	}
-
-	rt, err = s.db.MakeRefreshToken(r.Context(), rt.UserID)
-	if err != nil {
-		respondWithError(w, "failed to create refresh token", http.StatusInternalServerError, err)
-		return
-	}
-
-	respondWithJSON(w, http.StatusOK, struct {
+	s.respondWithJSON(w, http.StatusOK, struct {
 		JWT          string `json:"jwt"`
 		RefreshToken string `json:"refresh_token"`
 	}{
-		JWT:          token,
-		RefreshToken: rt.Token,
+		JWT:          jwt,
+		RefreshToken: refreshToken,
 	})
-}
-
-func isRevoked(rt database.RefreshToken) bool {
-	revoked := rt.RevokedAt != nil
-	if revoked {
-		slog.Info("revoked")
-	}
-	return revoked
-}
-
-func isExpired(rt database.RefreshToken) bool {
-	expired := rt.ExpiresAt.UTC().Before(time.Now().UTC())
-	if expired {
-		slog.Info("expired: " + rt.ExpiresAt.String())
-	}
-	return expired
 }

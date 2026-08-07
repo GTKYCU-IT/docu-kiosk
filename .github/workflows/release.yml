@@ -92,6 +92,9 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.version.outputs.tags }}
+          build-args: |
+            VERSION=v${{ steps.version.outputs.version }}
+            COMMIT=${{ github.sha }}
       - uses: softprops/action-gh-release@v3
         if: steps.version.outputs.prerelease == 'false'
         with:

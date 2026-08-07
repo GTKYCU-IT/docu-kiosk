@@ -49,11 +49,21 @@ Load `extension/dist/` as an unpacked extension at `edge://extensions` → "Load
 
 ### Broker
 
-The broker requires no environment variables. Kiosk registrations are persisted in `kiosks.db` (SQLite). Authentication is IP-based — no secrets or registration keys needed.
+| Variable | Required | Description |
+|---|---|---|
+| `DOCU_KIOSK_TOKEN_SECRET` | yes | JWT signing key for admin auth; at least 32 random characters (`openssl rand -hex 32`). The broker refuses to start without it. |
+| `AUTH_USERNAME` / `AUTH_PASSWORD` | first boot only | Admin credentials, created only when the users table is empty. |
+| `TRUSTED_PROXIES` | behind Caddy | Comma-separated IPs/CIDRs of reverse proxies. `X-Forwarded-For` is honored only from these peers, so clients cannot spoof their kiosk IP. Leave empty when clients connect directly. |
+| `CORS_ORIGINS` | no | See below. |
+| `LOG_LEVEL` | no | `DEBUG`, `INFO`, `WARN`, or `ERROR` (default `INFO`). |
+
+Kiosk registrations are persisted in `kiosks.db` (SQLite). Authentication is IP-based — no secrets or registration keys needed.
+
+`GET /api/version` reports the running build (`{"version": "…", "commit": "…"}`); the same values are logged at startup. The kiosk SPA shows the version as a subtle footer label.
 
 Cross-origin requests fail closed. Same-origin requests (the kiosk SPA served by the broker) and `chrome-extension://` origins are always allowed; set `CORS_ORIGINS` (comma-separated, see `.env.example`) to allow additional cross-origin callers such as an admin UI on another host.
 
-Caddy runs independently on the server as a reverse proxy in front of the broker. See the [DevOps wiki](../../wiki/DevOps) for server configuration.
+Caddy runs independently on the server as a reverse proxy in front of the broker. Set `TRUSTED_PROXIES` to Caddy's address so kiosk IPs resolve through the proxy. See the [DevOps wiki](../../wiki/DevOps) for server configuration.
 
 ### Extension
 

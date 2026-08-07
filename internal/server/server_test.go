@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/calvertjadon/docu-kiosk/internal/auth"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
 	"github.com/coder/websocket"
@@ -45,12 +47,25 @@ func newTestDB(t *testing.T) *database.Queries {
 
 func setupTestServer(t *testing.T) (*server, *httptest.Server) {
 	t.Helper()
+	db := newTestDB(t)
+	authModule, err := auth.NewAuthModule(db, []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	s := &server{
-		db:     newTestDB(t),
-		hub:    hub.New(),
-		logger: newLogger(),
+		db:         db,
+		hub:        hub.New(),
+		authModule: authModule,
+		logger:     newLogger(),
+	}
+	if err := s.ensureAdminUser("admin", "admin1234"); err != nil {
+		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /protected", s.ensureAuthMiddleware(s.handleProtected))
+	mux.HandleFunc("POST /login", s.handleLogin)
+	mux.HandleFunc("POST /refresh", s.handleRefresh)
+	mux.HandleFunc("GET /api/version", s.handleVersion)
 	mux.HandleFunc("POST /api/kiosks", s.handleRegister)
 	mux.HandleFunc("GET /api/kiosks", s.handleListKiosks)
 	mux.HandleFunc("POST /api/kiosks/{id}/sessions", s.handlePush)
@@ -58,6 +73,22 @@ func setupTestServer(t *testing.T) (*server, *httptest.Server) {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	return s, ts
+}
+
+// login obtains a JWT and refresh token for the bootstrap admin user.
+func login(t *testing.T, ts *httptest.Server, username, password string) (int, string) {
+	t.Helper()
+	body := strings.NewReader(fmt.Sprintf(`{"username": %q, "password": %q}`, username, password))
+	res, err := http.Post(ts.URL+"/login", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res.StatusCode, string(data)
 }
 
 func waitFor(t *testing.T, condition func() bool) {

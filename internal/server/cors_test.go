@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/calvertjadon/docu-kiosk/internal/auth"
 	"github.com/coder/websocket"
 )
 
@@ -22,7 +23,12 @@ func discardLogger() *slog.Logger {
 func corsTestServer(t *testing.T, env string) *httptest.Server {
 	t.Helper()
 	t.Setenv("CORS_ORIGINS", env)
-	s, err := NewServer(0, newTestDB(t))
+	db := newTestDB(t)
+	authModule, err := auth.NewAuthModule(db, []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(0, db, authModule, "admin", "admin1234")
 	if err != nil {
 		t.Fatal(err)
 	}
