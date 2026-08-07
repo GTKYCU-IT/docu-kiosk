@@ -86,6 +86,14 @@ func (f *fakeConn) CloseNow() error {
 	return nil
 }
 
+// isClosed reports whether CloseNow has been observed, i.e. the session's
+// deferred teardown has fully run.
+func (f *fakeConn) isClosed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed
+}
+
 func (f *fakeConn) recordedWrites() [][]byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -186,6 +194,9 @@ func TestServeRejectsUnregisteredIP(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", rec.Code)
 	}
+	if rec.Body.String() != "unregistered ip\n" {
+		t.Errorf("expected body %q, got %q", "unregistered ip\n", rec.Body.String())
+	}
 }
 
 func TestServeAuthLookupErrorIsServerError(t *testing.T) {
@@ -195,6 +206,9 @@ func TestServeAuthLookupErrorIsServerError(t *testing.T) {
 	h.Serve(rec, req, "10.0.0.5")
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500, got %d", rec.Code)
+	}
+	if rec.Body.String() != "internal error\n" {
+		t.Errorf("expected body %q, got %q", "internal error\n", rec.Body.String())
 	}
 }
 
@@ -260,6 +274,31 @@ func TestRunSessionReconnectReplacesSession(t *testing.T) {
 		t.Fatalf("expected exactly session %v, got %v", id, got)
 	}
 
+	// Stale-teardown ordering: A's session ends only after B has replaced it.
+	// A's deferred cleanup must not delete B's entry. Close A's read, then
+	// wait until A's CloseNow has been observed, which proves A's cleanup ran
+	// in full (delete happens before CloseNow in the deferred chain).
+	connA.closeRead()
+	waitFor(t, func() bool { return connA.isClosed() })
+
+	if got := h.Connected(); len(got) != 1 || got[0] != id {
+		t.Fatalf("stale teardown removed live session: expected exactly %v, got %v", id, got)
+	}
+
+	// The live session B must still accept writes.
+	msg := protocol.NewSign("https://docusign.example.com/signing/abc123")
+	if err := h.Send(context.Background(), id, msg); err != nil {
+		t.Fatalf("send after stale teardown: %v", err)
+	}
+	var got protocol.Sign
+	if err := json.Unmarshal(connB.lastWrite(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got != msg {
+		t.Errorf("expected %+v, got %+v", msg, got)
+	}
+
+	// B's death removes the session entirely.
 	connB.closeRead()
 	waitFor(t, func() bool { return len(h.Connected()) == 0 })
 }

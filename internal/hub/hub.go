@@ -105,7 +105,9 @@ func (h *Hub) runSession(ctx context.Context, k Kiosk, ip string, c conn) {
 	h.logger.Info("kiosk connected", "kiosk_id", k.ID, "name", k.Name, "ip", ip)
 	defer func() {
 		h.mu.Lock()
-		delete(h.sessions, k.ID)
+		if h.sessions[k.ID] == c {
+			delete(h.sessions, k.ID)
+		}
 		h.mu.Unlock()
 		h.logger.Info("kiosk disconnected", "kiosk_id", k.ID, "name", k.Name)
 	}()
@@ -116,6 +118,7 @@ func (h *Hub) runSession(ctx context.Context, k Kiosk, ip string, c conn) {
 		return
 	}
 	if err := c.Write(ctx, websocket.MessageText, data); err != nil {
+		h.logger.Error("write greeting", "error", err, "kiosk_id", k.ID)
 		return
 	}
 
@@ -160,6 +163,7 @@ func (h *Hub) pingLoop(ctx context.Context, cancel context.CancelFunc, c conn) {
 func (h *Hub) Send(ctx context.Context, id uuid.UUID, msg protocol.Message) error {
 	data, err := protocol.Marshal(msg)
 	if err != nil {
+		h.logger.Error("push failed: marshal", "error", err, "kiosk_id", id)
 		return err
 	}
 
@@ -174,7 +178,7 @@ func (h *Hub) Send(ctx context.Context, id uuid.UUID, msg protocol.Message) erro
 
 	if err := c.Write(ctx, websocket.MessageText, data); err != nil {
 		h.logger.Error("push failed: write to kiosk", "error", err, "kiosk_id", id)
-		return fmt.Errorf("%w: %v", ErrWriteFailed, err)
+		return fmt.Errorf("%w: %w", ErrWriteFailed, err)
 	}
 	return nil
 }
