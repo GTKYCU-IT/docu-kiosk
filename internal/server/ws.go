@@ -2,10 +2,10 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"time"
 
+	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/coder/websocket"
 )
 
@@ -41,7 +41,11 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	data, _ := json.Marshal(map[string]string{"type": "connected", "name": k.Name})
+	data, err := protocol.Marshal(protocol.NewGreeting(k.Name))
+	if err != nil {
+		s.logger.Error("marshal greeting", "error", err, "kiosk_id", k.ID)
+		return
+	}
 	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
 		return
 	}
