@@ -51,6 +51,7 @@ Load `extension/dist/` as an unpacked extension at `edge://extensions` → "Load
 
 | Variable | Required | Description |
 |---|---|---|
+| `PORT` | no | Port the broker listens on (default `8080`). |
 | `DOCU_KIOSK_TOKEN_SECRET` | yes | JWT signing key for admin auth; at least 32 random characters (`openssl rand -hex 32`). The broker refuses to start without it. |
 | `AUTH_USERNAME` / `AUTH_PASSWORD` | first boot only | Admin credentials, created only when the users table is empty. |
 | `TRUSTED_PROXIES` | behind Caddy | Comma-separated IPs/CIDRs of reverse proxies. `X-Forwarded-For` is honored only from these peers, so clients cannot spoof their kiosk IP. Leave empty when clients connect directly. |

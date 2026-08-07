@@ -6,11 +6,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/calvertjadon/docu-kiosk/internal/auth"
 	"github.com/coder/websocket"
 )
 
@@ -19,16 +19,12 @@ func discardLogger() *slog.Logger {
 }
 
 // corsTestServer builds the real handler chain (CORS -> logging -> mux) with
-// CORS_ORIGINS pinned to env so tests are independent of the developer's env.
-func corsTestServer(t *testing.T, env string) *httptest.Server {
+// CORS origins pinned via cfg so tests are independent of the developer's env.
+func corsTestServer(t *testing.T, origins ...string) *httptest.Server {
 	t.Helper()
-	t.Setenv("CORS_ORIGINS", env)
-	db := newTestDB(t)
-	authModule, err := auth.NewAuthModule(db, []byte("0123456789abcdef0123456789abcdef"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := NewServer(0, db, authModule, "admin", "admin1234")
+	cfg := testConfig()
+	cfg.CORSOrigins = origins
+	s, err := NewServer(cfg, newTestDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,30 +33,23 @@ func corsTestServer(t *testing.T, env string) *httptest.Server {
 	return ts
 }
 
-func TestNewCORSConfigParsing(t *testing.T) {
-	t.Setenv("CORS_ORIGINS", "admin.example.com, https://ops.example.com, chrome-extension://abc, http://")
-	cfg := newCORSConfig(discardLogger())
-	want := []string{"https://admin.example.com", "https://ops.example.com", "chrome-extension://abc"}
-	if len(cfg.allowedOrigins) != len(want) {
-		t.Fatalf("allowedOrigins = %v, want %v", cfg.allowedOrigins, want)
-	}
-	for i := range want {
-		if cfg.allowedOrigins[i] != want[i] {
-			t.Fatalf("allowedOrigins = %v, want %v", cfg.allowedOrigins, want)
-		}
-	}
-
-	t.Setenv("CORS_ORIGINS", "")
-	cfg = newCORSConfig(discardLogger())
+func TestNewCORSConfigAllowlist(t *testing.T) {
+	cfg := newCORSConfig(nil, discardLogger())
 	if len(cfg.allowedOrigins) != 1 || cfg.allowedOrigins[0] != "chrome-extension://" {
 		t.Fatalf("default allowedOrigins = %v, want [chrome-extension://]", cfg.allowedOrigins)
+	}
+
+	origins := []string{"https://admin.example.com"}
+	cfg = newCORSConfig(origins, discardLogger())
+	if !slices.Equal(cfg.allowedOrigins, origins) {
+		t.Fatalf("allowedOrigins = %v, want %v", cfg.allowedOrigins, origins)
 	}
 }
 
 func TestCORSMiddleware(t *testing.T) {
 	cases := []struct {
 		name       string
-		env        string
+		origins    []string
 		origin     string
 		host       string
 		method     string
@@ -119,7 +108,7 @@ func TestCORSMiddleware(t *testing.T) {
 		},
 		{
 			name:       "allowlisted cross-origin passes",
-			env:        "https://admin.example.com",
+			origins:    []string{"https://admin.example.com"},
 			origin:     "https://admin.example.com",
 			host:       "kiosk.local:8080",
 			method:     http.MethodGet,
@@ -128,7 +117,7 @@ func TestCORSMiddleware(t *testing.T) {
 		},
 		{
 			name:       "allowlist does not admit other cross-origins",
-			env:        "https://admin.example.com",
+			origins:    []string{"https://admin.example.com"},
 			origin:     "https://evil.example.com",
 			host:       "kiosk.local:8080",
 			method:     http.MethodGet,
@@ -136,7 +125,7 @@ func TestCORSMiddleware(t *testing.T) {
 		},
 		{
 			name:       "allowed preflight returns 204 with headers",
-			env:        "https://admin.example.com",
+			origins:    []string{"https://admin.example.com"},
 			origin:     "https://admin.example.com",
 			host:       "kiosk.local:8080",
 			method:     http.MethodOptions,
@@ -161,8 +150,7 @@ func TestCORSMiddleware(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("CORS_ORIGINS", tc.env)
-			ts := httptest.NewServer(newCORSConfig(discardLogger()).middleware(
+			ts := httptest.NewServer(newCORSConfig(tc.origins, discardLogger()).middleware(
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusOK)
 				}),
@@ -201,7 +189,7 @@ func TestCORSMiddleware(t *testing.T) {
 // own origin as the Origin header, which the fail-closed CORS rewrite must
 // not reject.
 func TestWSBrowserSameOriginConnects(t *testing.T) {
-	ts := corsTestServer(t, "")
+	ts := corsTestServer(t)
 	registerKiosk(t, ts, "kiosk-a")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -226,7 +214,7 @@ func TestWSBrowserSameOriginConnects(t *testing.T) {
 // TestWSBrowserCrossOriginRejected proves cross-origin WebSocket handshakes
 // fail closed (403) before the upgrade.
 func TestWSBrowserCrossOriginRejected(t *testing.T) {
-	ts := corsTestServer(t, "")
+	ts := corsTestServer(t)
 	registerKiosk(t, ts, "kiosk-a")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -242,7 +230,7 @@ func TestWSBrowserCrossOriginRejected(t *testing.T) {
 // TestKioskRegistrationSameOrigin proves the same-origin POST registration
 // flow (the staging send-to-kiosk path) passes the CORS gate.
 func TestKioskRegistrationSameOrigin(t *testing.T) {
-	ts := corsTestServer(t, "")
+	ts := corsTestServer(t)
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/kiosks", strings.NewReader(`{"name":"kiosk-a"}`))
 	if err != nil {
 		t.Fatal(err)
