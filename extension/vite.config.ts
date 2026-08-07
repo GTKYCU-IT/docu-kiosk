@@ -20,17 +20,6 @@ export default defineConfig({
     crx({ manifest }),
     zip({ outDir: 'release', outFileName: `crx-${name}-${version}.zip` }),
   ],
-
-  // CRXJS only builds HTML pages referenced in manifest fields (options_page,
-  // default_popup, ...). The interception redirect target isn't one of those,
-  // so register it explicitly as a Vite multi-page entry.
-  build: {
-    rollupOptions: {
-      input: {
-        intercepted: path.resolve(__dirname, 'src/intercepted/index.html'),
-      },
-    },
-  },
   server: {
     cors: {
       origin: [

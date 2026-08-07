@@ -56,7 +56,3 @@ Configure via the intercepted page's options view, or push via MDM/GPO using `ch
 | Option | Description |
 |---|---|
 | `brokerUrl` | Base URL of the broker, e.g. `https://broker.yourdomain.local` |
-
-**What gets intercepted:** only DocuSign *signing* entry points, matched by a small set of short URL patterns — legacy `*.docusign.net/Signing/...` links (including email signing links like `MTRedeem` and `StartInSession.aspx`) and `Member/PowerFormSigning.aspx`, plus the newer `apps.docusign.com/authenticate` embedded-signing URLs. The staff-facing web app (`app.docusign.com`, `account.docusign.com`) is never intercepted, so employees can still sign in and send documents manually.
-
-**Debugging:** every main-frame navigation to a DocuSign host is logged to the extension's service-worker console (`chrome://extensions` → "service worker" → inspect), so URLs that slip past the patterns are recoverable. The intercepted page also shows the original URL with a copy button.

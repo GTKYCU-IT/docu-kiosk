@@ -1,0 +1,105 @@
+### 
+
+# Run the `login` request first — it stores `jwt` and `refresh_token` as
+# kulala globals that the requests below consume via {{jwt}} / {{refresh_token}}.
+# # NOTE: do NOT use `run #login` on these blocks. In this kulala-core version a
+# `run #<name>` directive runs the named request *instead of* the block's own
+# request, so the post-response script ends up asserting against login's 200
+# response and every test passes regardless of the code you assert.
+
+
+### login
+
+@hostname = localhost
+@port = 8080
+
+POST http://{{hostname}}:{{port}}/login HTTP/1.1
+Content-Type: application/json
+
+{
+  "password": "{{AUTH_PASSWORD}}",
+  "username": "{{AUTH_USERNAME}}"
+}
+
+> {%
+  client.global.set("jwt", response.body.jwt);
+  client.global.set("refresh_token", response.body.refresh_token);
+%}
+
+
+### protected-success
+
+# Valid JWT in the Authorization header should be accepted.
+
+@hostname = localhost
+@port = 8080
+
+GET http://{{hostname}}:{{port}}/protected HTTP/1.1
+Accept: application/json
+Authorization: Bearer {{jwt}}
+
+> {%
+  client.test("protected accepts a valid jwt", function() {
+    client.assert(response.status == 200, "Expected 200, got " + response.status)
+  })
+%}
+
+
+### protected-fail
+
+# A bad JWT should be rejected.
+
+@hostname = localhost
+@port = 8080
+
+GET http://{{hostname}}:{{port}}/protected HTTP/1.1
+Accept: application/json
+Authorization: Bearer bad-token
+
+> {%
+  client.test("protected rejects a bad jwt", function() {
+    client.assert(response.status == 401, "Expected 401 Unauthorized, got " + response.status)
+  })
+%}
+
+
+### refresh
+
+# A valid refresh token returns a new jwt + refresh token (200).
+
+@hostname = localhost
+@port = 8080
+
+POST http://{{hostname}}:{{port}}/refresh HTTP/1.1
+Authorization: Bearer {{refresh_token}}
+
+> {%
+  client.test("refresh succeeds", function() {
+    client.assert(response.status == 200, "Expected 200, got " + response.status)
+  })
+  client.test("issues a new jwt", function() {
+    client.assert(response.body.jwt, "Expected a jwt in the response body")
+  })
+  client.test("issues a new refresh token", function() {
+    client.assert(response.body.refresh_token, "Expected a refresh_token in the response body")
+  })
+%}
+
+
+### refresh-revoked
+
+# The previous refresh token was rotated/revoked by the `refresh` request above,
+# so replaying the same {{refresh_token}} must be rejected (401).
+# Run `login` -> `refresh` -> `refresh-revoked` in that order.
+
+@hostname = localhost
+@port = 8080
+
+POST http://{{hostname}}:{{port}}/refresh HTTP/1.1
+Authorization: Bearer {{refresh_token}}
+
+> {%
+  client.test("a rotated refresh token is rejected", function() {
+    client.assert(response.status == 401, "Expected 401, got " + response.status)
+  })
+%}

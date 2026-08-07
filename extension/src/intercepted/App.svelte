@@ -2,37 +2,48 @@
   import { onMount, onDestroy } from 'svelte'
   import { getConfig } from '../config'
   import { Button } from '$lib/components/ui/button'
-  import { ExternalLink, Send } from '@lucide/svelte'
+  import { Send } from '@lucide/svelte'
   import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '$lib/components/ui/card'
-  import { toast } from 'svelte-sonner'
+  import { Input } from '$lib/components/ui/input'
+  import { Label } from '$lib/components/ui/label'
 
+  type View = 'loading' | 'picker' | 'options'
   type Kiosk = { id: string; name: string }
 
+  let view = $state<View>('loading')
+
+  // picker state
   let status = $state('')
   let kiosks = $state<Kiosk[]>([])
   let sending = $state(false)
-  let copied = $state(false)
-  let brokerUrl = $state('')
-  let pendingUrl = $state('')
+  let brokerUrl = ''
+  let pendingUrl = ''
   let pollInterval: ReturnType<typeof setInterval> | undefined
+
+  // options state
+  let optionsBrokerUrl = $state('')
+  let saved = $state(false)
 
   onMount(async () => {
     const hash = window.location.hash
     if (!hash.startsWith('#url=')) {
-      status = 'No signing link intercepted.'
+      const data = await chrome.storage.local.get('brokerUrl') as { brokerUrl?: string }
+      optionsBrokerUrl = data.brokerUrl ?? ''
+      view = 'options'
       return
     }
-
-    pendingUrl = hash.slice('#url='.length)
 
     const cfg = await getConfig()
     brokerUrl = cfg.brokerUrl ?? ''
+    pendingUrl = hash.slice('#url='.length)
 
     if (!brokerUrl) {
-      status = 'Broker URL not configured. Open the extension options to set it.'
+      status = 'Broker URL not configured. Open extension options to set it.'
+      view = 'picker'
       return
     }
 
+    view = 'picker'
     await refreshKiosks()
     pollInterval = setInterval(refreshKiosks, 3000)
   })
@@ -73,96 +84,52 @@
     }
   }
 
-  async function bypass() {
-    // MV3 service workers can be idle when the intercepted page has been open
-    // for a while.  chrome.runtime.sendMessage must wake the worker, and the
-    // first attempt can race with startup — retry a few times with backoff.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const response = await chrome.runtime.sendMessage({ type: 'bypass', url: pendingUrl })
-        if (response?.error) {
-          const msg = `Bypass failed: ${response.error}`
-          console.error('[docu-kiosk]', msg)
-          await copyPendingUrl()
-          toast.error(msg)
-          return
-        }
-        return // success — the tab will open
-      } catch (err) {
-        // sendMessage itself failed — SW may not be running yet
-        console.warn('[docu-kiosk] sendMessage attempt %d failed: %o', attempt + 1, err)
-        if (attempt < 2) {
-          await new Promise(r => setTimeout(r, 300 * (attempt + 1)))
-        }
-      }
-    }
-    // All retries exhausted
-    console.error('[docu-kiosk] bypass: all sendMessage attempts failed')
-    await copyPendingUrl()
-    toast.error('Could not open in browser. The URL has been copied to your clipboard.')
-  }
-
-  async function copyPendingUrl() {
-    try {
-      await navigator.clipboard.writeText(pendingUrl)
-    } catch {
-      const ta = document.createElement('textarea')
-      ta.value = pendingUrl
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      ta.remove()
-    }
-    copied = true
-    setTimeout(() => { copied = false }, 1500)
+  async function saveOptions() {
+    await chrome.storage.local.set({ brokerUrl: optionsBrokerUrl })
+    saved = true
+    setTimeout(() => { saved = false }, 2000)
   }
 </script>
 
-<div class="flex min-h-svh items-center justify-center bg-muted p-4">
-  <Card class="w-full max-w-sm">
-    <CardHeader>
-      <CardTitle>Send to Kiosk</CardTitle>
-      <CardDescription>
-        The signing link has been intercepted. Select a kiosk below to send the document to the member.
-      </CardDescription>
-    </CardHeader>
-    <CardContent class="flex flex-col gap-2">
-      {#if sending}
-        <p class="text-sm text-muted-foreground">{status}</p>
-      {:else if kiosks.length > 0}
-        {#each kiosks as kiosk (kiosk.id)}
-          <Button variant="outline" class="w-full justify-start" onclick={() => sendToKiosk(kiosk)}>
-            <Send class="mr-2 size-4" />{kiosk.name}
-          </Button>
-        {/each}
-      {:else}
-        <p class="text-sm text-muted-foreground">{status || 'No kiosks are connected. Waiting…'}</p>
-      {/if}
-
-
-      <details class="mt-4 rounded-md border p-2">
-        <summary class="cursor-pointer select-none text-xs text-muted-foreground">Original URL</summary>
-        <div class="mt-2 flex items-center gap-2">
-          <input
-            readonly
-            value={pendingUrl}
-            class="w-full rounded border bg-muted px-2 py-1 font-mono text-xs"
-          />
-          <Button variant="outline" size="sm" onclick={copyPendingUrl}>
-            {copied ? 'Copied!' : 'Copy'}
-          </Button>
+{#if view === 'picker'}
+  <div class="flex min-h-svh items-center justify-center bg-muted p-4">
+    <Card class="w-full max-w-sm">
+      <CardHeader>
+        <CardTitle>Send to Kiosk</CardTitle>
+        <CardDescription>
+          The signing link has been intercepted. Select a kiosk below to send the document to the member.
+        </CardDescription>
+      </CardHeader>
+      <CardContent class="flex flex-col gap-2">
+        {#if sending}
+          <p class="text-sm text-muted-foreground">{status}</p>
+        {:else if kiosks.length > 0}
+          {#each kiosks as kiosk (kiosk.id)}
+            <Button variant="outline" class="w-full justify-start" onclick={() => sendToKiosk(kiosk)}>
+              <Send class="mr-2 size-4" />{kiosk.name}
+            </Button>
+          {/each}
+        {:else}
+          <p class="text-sm text-muted-foreground">{status || 'No kiosks are connected. Waiting…'}</p>
+        {/if}
+      </CardContent>
+    </Card>
+  </div>
+{:else if view === 'options'}
+  <div class="flex min-h-svh items-center justify-center bg-muted p-4">
+    <Card class="w-full max-w-sm">
+      <CardHeader>
+        <CardTitle>DocuKiosk Settings</CardTitle>
+      </CardHeader>
+      <CardContent class="flex flex-col gap-4">
+        <div class="flex flex-col gap-2">
+          <Label for="brokerUrl">Broker URL</Label>
+          <Input id="brokerUrl" type="url" placeholder="https://broker.internal" bind:value={optionsBrokerUrl} />
         </div>
-      </details>
-
-      {#if pendingUrl}
-        <Button
-          variant="ghost"
-          class="w-full justify-start"
-          onclick={bypass}
-        >
-          <ExternalLink class="mr-2 size-4" />Open in browser
+        <Button onclick={saveOptions} class="w-full">
+          {saved ? 'Saved!' : 'Save'}
         </Button>
-      {/if}
-    </CardContent>
-  </Card>
-</div>
+      </CardContent>
+    </Card>
+  </div>
+{/if}

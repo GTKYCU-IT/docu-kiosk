@@ -1,7 +1,7 @@
 {
   "name": "docu-kiosk",
   "type": "module",
-  "version": "2.2.5",
+  "version": "2.2.2",
   "private": true,
   "scripts": {
     "dev": "vite",
@@ -29,8 +29,5 @@
     "vite": "^8.0.0",
     "vite-plugin-zip-pack": "^1.2.4",
     "vitest": "^4.1.6"
-  },
-  "dependencies": {
-    "svelte-sonner": "^1.1.1"
   }
 }

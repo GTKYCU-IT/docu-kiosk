@@ -7,22 +7,20 @@ import (
 	"net/http"
 )
 
-// RespondWithError writes an error JSON response.
-func RespondWithError(w http.ResponseWriter, msg string, code int, err error) {
+func respondWithError(w http.ResponseWriter, msg string, code int, err error) {
 	if err != nil {
 		msg = fmt.Sprintf("%s: %s", msg, err)
 	}
 	log.Println(msg)
 
-	RespondWithJSON(w, code, struct {
+	respondWithJSON(w, code, struct {
 		Error string `json:"error"`
 	}{
 		Error: msg,
 	})
 }
 
-// RespondWithJSON writes a JSON response with the given status code.
-func RespondWithJSON(w http.ResponseWriter, code int, payload any) {
+func respondWithJSON(w http.ResponseWriter, code int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 
 	data, err := json.Marshal(payload)

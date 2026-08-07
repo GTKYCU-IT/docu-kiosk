@@ -21,7 +21,7 @@ dev-broker: ## Start broker with air (hot-reload)
 	air
 
 run: ## Run broker with dev secrets (no hot-reload)
-	DOCU_KIOSK_TOKEN_SECRET=dev go run ./cmd/server
+	DOCU_KIOSK_TOKEN_SECRET=dev DOCU_KIOSK_REGISTRATION_KEY=dev go run ./cmd/server
 
 ## Testing
 test: ## Run Go tests

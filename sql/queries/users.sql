@@ -16,6 +16,3 @@ SELECT
     password
 FROM users
 WHERE username = ?;
-
--- name: CountUsers :one
-SELECT COUNT(*) FROM users;
