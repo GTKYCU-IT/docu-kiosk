@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
+import { BYPASS_RULE_START_ID } from './dnr-port'
 import { createFakeDnrPort } from './dnr-port.fake'
 import type { FakeDnrPort } from './dnr-port.fake'
+import type * as DnrPortModule from './dnr-port'
 import type * as BackgroundModule from './background'
 
 // The background module wires up its DNR port and Chrome listeners at import
@@ -11,11 +13,11 @@ import type * as BackgroundModule from './background'
 // modules per test file, so this does not affect background.test.ts.
 const holder = vi.hoisted(() => ({ fake: null as unknown as FakeDnrPort }))
 
-vi.mock('./dnr-port', () => ({
-  createChromeDnrPort: () => holder.fake,
+vi.mock('./dnr-port', async (importOriginal) => ({
   // dnr-port.fake.ts imports BYPASS_RULE_START_ID as a runtime value, so the
-  // mock factory must re-export it or the fake's counter starts at undefined.
-  BYPASS_RULE_START_ID: 100,
+  // mock must keep the real module's exports — the spread does that.
+  ...(await importOriginal<typeof DnrPortModule>()),
+  createChromeDnrPort: () => holder.fake,
 }))
 
 const getURL = vi.fn()
@@ -94,12 +96,42 @@ function rulesForTab(tabId: number): number[] {
     .map((r) => r.id)
 }
 
+/** An old intercept rule a prior worker run might have left installed. */
+function makeStaleRule(id: number): chrome.declarativeNetRequest.Rule {
+  return {
+    id,
+    priority: 1,
+    action: {
+      type: 'redirect',
+      redirect: { regexSubstitution: 'https://stale.invalid/#url=\\0' },
+    },
+    condition: { regexFilter: '^stale$', resourceTypes: ['main_frame'] },
+  }
+}
+
 describe('startup rule installation', () => {
-  it('installs the four intercept rules onto the port at startup', () => {
+  it('installs the four intercept rules onto a pristine port at startup', () => {
     expect(holder.fake.dynamicRules.size).toBe(4)
     const rules = [...holder.fake.dynamicRules.values()]
     expect(rules.map((r) => r.id)).toEqual([1, 2, 3, 4])
     expect(rules.map((r) => r.condition.regexFilter)).toEqual(mod.SIGNING_URL_FILTERS)
+  })
+
+  it('replaces stale intercept rules from a prior worker run at startup', async () => {
+    // Dynamic-scope rules survive a service-worker restart, so a prior run's
+    // intercept rules (IDs 1-4) can still be installed when this worker boots.
+    // The startup install must sweep them before adding the fresh set.
+    const stalePort = createFakeDnrPort()
+    for (let id = 1; id <= 4; id++) stalePort.dynamicRules.set(id, makeStaleRule(id))
+    holder.fake = stalePort
+    vi.resetModules()
+    mod = await import('./background')
+
+    expect(holder.fake.dynamicRules.size).toBe(4)
+    const rules = [...holder.fake.dynamicRules.values()]
+    expect(rules.map((r) => r.id)).toEqual([1, 2, 3, 4])
+    expect(rules.map((r) => r.condition.regexFilter)).toEqual(mod.SIGNING_URL_FILTERS)
+    expect(rules.some((r) => r.condition.regexFilter === '^stale$')).toBe(false)
   })
 
   it('logs a visible error when the port rejects the rules', async () => {
@@ -154,7 +186,7 @@ describe('bypass', () => {
     expect(tabsCreate).toHaveBeenCalledWith({ url: 'about:blank', active: false })
     expect(holder.fake.sessionRules.size).toBe(2)
     const rules = [...holder.fake.sessionRules.values()]
-    expect(rules.map((r) => r.id)).toEqual([100, 101])
+    expect(rules.map((r) => r.id)).toEqual([BYPASS_RULE_START_ID, BYPASS_RULE_START_ID + 1])
     expect(rules.every((r) => r.action.type === 'allow')).toBe(true)
     expect(rules.map((r) => r.condition.tabIds)).toEqual([[99], [99]])
 
@@ -215,12 +247,17 @@ describe('multi-tab bypass', () => {
     await mod.handleBypass('https://demo.docusign.net/Signing/b')
 
     expect(holder.fake.sessionRules.size).toBe(4)
-    expect([...holder.fake.sessionRules.keys()]).toEqual([100, 101, 102, 103])
-    expect(rulesForTab(10)).toEqual([100, 101])
-    expect(rulesForTab(20)).toEqual([102, 103])
+    expect([...holder.fake.sessionRules.keys()]).toEqual([
+      BYPASS_RULE_START_ID,
+      BYPASS_RULE_START_ID + 1,
+      BYPASS_RULE_START_ID + 2,
+      BYPASS_RULE_START_ID + 3,
+    ])
+    expect(rulesForTab(10)).toEqual([BYPASS_RULE_START_ID, BYPASS_RULE_START_ID + 1])
+    expect(rulesForTab(20)).toEqual([BYPASS_RULE_START_ID + 2, BYPASS_RULE_START_ID + 3])
 
     onRemovedListener!(10)
-    expect([...holder.fake.sessionRules.keys()]).toEqual([102, 103])
+    expect([...holder.fake.sessionRules.keys()]).toEqual([BYPASS_RULE_START_ID + 2, BYPASS_RULE_START_ID + 3])
   })
 })
 
@@ -228,7 +265,7 @@ describe('service-worker and browser restarts', () => {
   it('continues rule IDs across service-worker restarts on the same port', async () => {
     tabsCreate.mockResolvedValue({ id: 30 })
     await mod.handleBypass('https://demo.docusign.net/Signing/a')
-    expect([...holder.fake.sessionRules.keys()]).toEqual([100, 101])
+    expect([...holder.fake.sessionRules.keys()]).toEqual([BYPASS_RULE_START_ID, BYPASS_RULE_START_ID + 1])
 
     // Service-worker restart: fresh module instance, but the SAME fake port —
     // its session rules and ID counter outlive the worker.
@@ -238,12 +275,17 @@ describe('service-worker and browser restarts', () => {
     await mod.handleBypass('https://demo.docusign.net/Signing/b')
 
     expect(holder.fake.sessionRules.size).toBe(4)
-    expect([...holder.fake.sessionRules.keys()]).toEqual([100, 101, 102, 103])
+    expect([...holder.fake.sessionRules.keys()]).toEqual([
+      BYPASS_RULE_START_ID,
+      BYPASS_RULE_START_ID + 1,
+      BYPASS_RULE_START_ID + 2,
+      BYPASS_RULE_START_ID + 3,
+    ])
   })
 
-  it('restarts rule IDs at 100 after a browser restart', async () => {
+  it('restarts rule IDs at BYPASS_RULE_START_ID after a browser restart', async () => {
     await mod.handleBypass(testUrl)
-    expect([...holder.fake.sessionRules.keys()]).toEqual([100, 101])
+    expect([...holder.fake.sessionRules.keys()]).toEqual([BYPASS_RULE_START_ID, BYPASS_RULE_START_ID + 1])
 
     // Browser restart: fresh port (session rules and counter cleared) and a
     // fresh module instance.
@@ -253,24 +295,25 @@ describe('service-worker and browser restarts', () => {
     tabsCreate.mockResolvedValue({ id: 40 })
     await mod.handleBypass('https://demo.docusign.net/Signing/b')
 
-    expect([...holder.fake.sessionRules.keys()]).toEqual([100, 101])
+    expect([...holder.fake.sessionRules.keys()]).toEqual([BYPASS_RULE_START_ID, BYPASS_RULE_START_ID + 1])
   })
 
   it('sweeps stale colliding rules instead of duplicating them', async () => {
     await mod.handleBypass(testUrl)
     expect(holder.fake.sessionRules.size).toBe(2)
 
-    // Counter drifts back to 100 (e.g. the session counter was cleared) while
-    // the session rules 100/101 from the earlier bypass are still installed.
-    holder.fake.nextBypassId = 100
+    // Counter drifts back to BYPASS_RULE_START_ID (e.g. the session counter
+    // was cleared) while the session rules from the earlier bypass are still
+    // installed.
+    holder.fake.nextBypassId = BYPASS_RULE_START_ID
     tabsCreate.mockResolvedValue({ id: 60 })
     await mod.handleBypass('https://demo.docusign.net/Signing/c')
 
     // Sweep-then-add replaced the stale rules — no "Rule with id N does not
     // have a unique ID" rejection, and no duplicates.
     expect(holder.fake.sessionRules.size).toBe(2)
-    expect([...holder.fake.sessionRules.keys()]).toEqual([100, 101])
-    expect(rulesForTab(60)).toEqual([100, 101])
+    expect([...holder.fake.sessionRules.keys()]).toEqual([BYPASS_RULE_START_ID, BYPASS_RULE_START_ID + 1])
+    expect(rulesForTab(60)).toEqual([BYPASS_RULE_START_ID, BYPASS_RULE_START_ID + 1])
   })
 })
 

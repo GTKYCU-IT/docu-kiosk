@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterAll } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
 import { getConfig } from './config'
 
 // getConfig reads only chrome.storage.managed and chrome.storage.local; stub
@@ -14,6 +14,10 @@ vi.stubGlobal('chrome', {
 })
 
 afterAll(() => vi.unstubAllGlobals())
+
+beforeEach(() => {
+  vi.clearAllMocks()
+})
 
 describe('config', () => {
   it('falls back to the local brokerUrl when managed storage is empty', async () => {

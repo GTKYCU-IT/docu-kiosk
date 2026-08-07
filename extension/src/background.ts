@@ -22,12 +22,7 @@ const BYPASS_HOSTS = ['*://*.docusign.net/*', '*://*.docusign.com/*']
 // All declarative-net-request access — intercept install, bypass add/remove,
 // and bypass-ID allocation — goes through the port. Production uses the
 // Chrome-backed adapter; tests inject the fake.
-let dnrPort: DnrPort = createChromeDnrPort()
-
-/** Swap the port adapter (test seam). */
-export function setDnrPort(port: DnrPort): void {
-  dnrPort = port
-}
+const dnrPort: DnrPort = createChromeDnrPort()
 
 /** Active bypass allow-rule IDs, keyed by tabId. Used for cleanup when the tab closes. */
 const bypassRuleIds = new Map<number, number[]>()
@@ -105,7 +100,6 @@ function removeBypassRules(tabId: number) {
   bypassRuleIds.delete(tabId)
   void dnrPort.removeBypassRules(ruleIds)
 }
-
 
 export async function installRules() {
   try {
