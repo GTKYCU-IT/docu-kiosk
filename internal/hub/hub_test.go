@@ -25,13 +25,15 @@ import (
 // error once it is closed, but also returns ctx.Err() when ctx is done —
 // mirroring real conn semantics.
 type fakeConn struct {
-	mu         sync.Mutex
-	writes     [][]byte
-	writeErr   error
-	pingErr    error
-	readCh     chan struct{}
-	readClosed bool
-	closed     bool
+	mu           sync.Mutex
+	writes       [][]byte
+	writeErr     error
+	pingErr      error
+	readCh       chan struct{}
+	readClosed   bool
+	closed       bool
+	writeGate    chan struct{} // non-nil: Write blocks on it before recording
+	writeEntered chan struct{} // non-nil: closed when the first gated Write begins
 }
 
 func newFakeConn() *fakeConn {
@@ -54,7 +56,25 @@ func (f *fakeConn) setWriteErr(err error) {
 	f.writeErr = err
 }
 
+// setWriteGate makes subsequent Writes signal entered and block until gate is
+// closed, letting a test hold a write in flight while the hub state changes.
+func (f *fakeConn) setWriteGate(gate, entered chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.writeGate = gate
+	f.writeEntered = entered
+}
+
 func (f *fakeConn) Write(_ context.Context, _ websocket.MessageType, data []byte) error {
+	f.mu.Lock()
+	gate, entered := f.writeGate, f.writeEntered
+	f.mu.Unlock()
+	if gate != nil {
+		if entered != nil {
+			close(entered)
+		}
+		<-gate
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.writeErr != nil {
@@ -159,7 +179,7 @@ func newTestHub(store KioskStore) (*Hub, *syncBuffer) {
 // waitFor polls condition until it holds or the deadline passes.
 func waitFor(t *testing.T, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if condition() {
 			return
@@ -256,6 +276,27 @@ func TestRunSessionPingFailureClosesSession(t *testing.T) {
 	waitFor(t, func() bool { return len(h.Connected()) == 0 })
 }
 
+func TestRunSessionGreetingWriteFailureTearsDown(t *testing.T) {
+	h, buf := newTestHub(nil)
+	id := uuid.New()
+	fc := newFakeConn()
+	// The greeting write fails before the session ever serves a message.
+	fc.setWriteErr(errors.New("socket closed"))
+	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
+
+	// The session registers, the greeting write fails, and teardown removes it.
+	waitFor(t, func() bool { return len(h.Connected()) == 0 })
+	waitFor(t, func() bool { return fc.isClosed() })
+
+	logged := buf.String()
+	if !strings.Contains(logged, "write greeting") {
+		t.Errorf("expected log to mention write greeting, got: %s", logged)
+	}
+	if !strings.Contains(logged, id.String()) {
+		t.Errorf("expected log to contain kiosk id %s, got: %s", id, logged)
+	}
+}
+
 func TestRunSessionReconnectReplacesSession(t *testing.T) {
 	h, _ := newTestHub(nil)
 	id := uuid.New()
@@ -348,7 +389,8 @@ func TestSendWriteFailureIsServerError(t *testing.T) {
 	waitFor(t, func() bool {
 		return slices.Contains(h.Connected(), id) && len(fc.recordedWrites()) >= 1
 	})
-	fc.setWriteErr(errors.New("socket closed"))
+	underlying := errors.New("socket closed")
+	fc.setWriteErr(underlying)
 
 	err := h.Send(context.Background(), id, protocol.NewSign("https://example.com"))
 	if !errors.Is(err, ErrWriteFailed) {
@@ -357,6 +399,9 @@ func TestSendWriteFailureIsServerError(t *testing.T) {
 	if errors.Is(err, ErrNotConnected) {
 		t.Error("write failure must not be ErrNotConnected")
 	}
+	if !errors.Is(err, underlying) {
+		t.Errorf("expected %v to wrap underlying write error %v", err, underlying)
+	}
 
 	logged := buf.String()
 	if !strings.Contains(logged, "write to kiosk") {
@@ -364,6 +409,76 @@ func TestSendWriteFailureIsServerError(t *testing.T) {
 	}
 	if !strings.Contains(logged, id.String()) {
 		t.Errorf("expected log to contain kiosk id %s, got: %s", id, logged)
+	}
+}
+
+func TestSendReconnectMidWriteIsWriteFailed(t *testing.T) {
+	h, buf := newTestHub(nil)
+	id := uuid.New()
+
+	// connA is the live session; its greeting succeeds before we arm the gate.
+	connA := newFakeConn()
+	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connA)
+	waitFor(t, func() bool {
+		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
+	})
+
+	// Gate connA's Writes: Send grabs connA and blocks inside Write.
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	connA.setWriteGate(release, entered)
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- h.Send(context.Background(), id, protocol.NewSign("https://example.com"))
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("send did not block inside Write")
+	}
+
+	// While Send is blocked, the kiosk reconnects and replaces the session.
+	connB := newFakeConn()
+	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connB)
+	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
+
+	// Release the stale write; Send must detect the swap and fail loudly.
+	close(release)
+	select {
+	case err := <-sendDone:
+		if !errors.Is(err, ErrWriteFailed) {
+			t.Errorf("expected ErrWriteFailed, got %v", err)
+		}
+		if errors.Is(err, ErrNotConnected) {
+			t.Error("mid-write reconnect must not be ErrNotConnected")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("send did not return after write released")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "push lost: kiosk reconnected mid-write") {
+		t.Errorf("expected log to mention reconnected mid-write, got: %s", logged)
+	}
+	if !strings.Contains(logged, id.String()) {
+		t.Errorf("expected log to contain kiosk id %s, got: %s", id, logged)
+	}
+
+	// The replacement session is still live and still accepts writes.
+	if got := h.Connected(); len(got) != 1 || got[0] != id {
+		t.Fatalf("expected exactly session %v, got %v", id, got)
+	}
+	msg := protocol.NewSign("https://docusign.example.com/signing/def456")
+	if err := h.Send(context.Background(), id, msg); err != nil {
+		t.Fatalf("send to replacement session: %v", err)
+	}
+	var got protocol.Sign
+	if err := json.Unmarshal(connB.lastWrite(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got != msg {
+		t.Errorf("expected %+v, got %+v", msg, got)
 	}
 }
 

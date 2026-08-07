@@ -158,8 +158,11 @@ func (h *Hub) pingLoop(ctx context.Context, cancel context.CancelFunc, c conn) {
 
 // Send writes a protocol message to the kiosk session. Unregistered ->
 // ErrNotConnected (Warn-logged). Registered but write fails -> ErrWriteFailed
-// wrapping the write error (Error-logged with kiosk_id). Logging of failures
-// lives INSIDE Send.
+// wrapping the write error (Error-logged with kiosk_id). After the write, Send
+// re-checks the session map: if the kiosk reconnected mid-write, the message
+// never reached the live session and Send returns ErrWriteFailed (Warn-logged),
+// even when the stale conn accepted the write. Logging of failures lives
+// INSIDE Send.
 func (h *Hub) Send(ctx context.Context, id uuid.UUID, msg protocol.Message) error {
 	data, err := protocol.Marshal(msg)
 	if err != nil {
@@ -177,8 +180,28 @@ func (h *Hub) Send(ctx context.Context, id uuid.UUID, msg protocol.Message) erro
 	}
 
 	if err := c.Write(ctx, websocket.MessageText, data); err != nil {
+		// The write went to c; confirm c is still the live session for id.
+		h.mu.RLock()
+		cur, still := h.sessions[id]
+		h.mu.RUnlock()
+		if still && cur != c {
+			// A replacement conn took over while the write was in flight, so
+			// the message did not reach the live session.
+			h.logger.Warn("push lost: kiosk reconnected mid-write", "kiosk_id", id)
+			return fmt.Errorf("%w: %w", ErrWriteFailed, err)
+		}
 		h.logger.Error("push failed: write to kiosk", "error", err, "kiosk_id", id)
 		return fmt.Errorf("%w: %w", ErrWriteFailed, err)
+	}
+
+	h.mu.RLock()
+	cur, still := h.sessions[id]
+	h.mu.RUnlock()
+	if still && cur != c {
+		// The stale conn accepted the write, but a replacement conn now owns
+		// the session, so the message never reached the live kiosk.
+		h.logger.Warn("push lost: kiosk reconnected mid-write", "kiosk_id", id)
+		return fmt.Errorf("%w: kiosk reconnected mid-write", ErrWriteFailed)
 	}
 	return nil
 }
