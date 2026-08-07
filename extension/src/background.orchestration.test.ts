@@ -28,8 +28,6 @@ const tabsUpdate = vi.fn()
 const tabsRemove = vi.fn()
 const onRemovedAddListener = vi.fn()
 const webNavOnBeforeNavigate = vi.fn()
-const storageManagedGet = vi.fn()
-const storageLocalGet = vi.fn()
 
 vi.stubGlobal('chrome', {
   runtime: {
@@ -44,10 +42,6 @@ vi.stubGlobal('chrome', {
     onRemoved: { addListener: onRemovedAddListener },
   },
   webNavigation: { onBeforeNavigate: { addListener: webNavOnBeforeNavigate } },
-  storage: {
-    managed: { get: storageManagedGet },
-    local: { get: storageLocalGet },
-  },
 })
 
 // `mod` is loaded with `await import()` (not a static import) deliberately:
@@ -70,8 +64,6 @@ beforeEach(async () => {
   getURL.mockImplementation((p: string) => `chrome-extension://testid/${p}`)
   tabsCreate.mockResolvedValue({ id: 99 })
   tabsUpdate.mockResolvedValue(undefined)
-  storageManagedGet.mockResolvedValue({})
-  storageLocalGet.mockResolvedValue({ brokerUrl: 'https://broker.internal' })
 
   // Fresh fake port and fresh module instance per test, so the startup
   // install and listener wiring run against the fake and the chrome stub.

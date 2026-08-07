@@ -49,6 +49,17 @@ export function createFakeDnrPort(): FakeDnrPort {
       addRules: chrome.declarativeNetRequest.Rule[],
       removeRuleIds: number[]
     ): Promise<void> {
+      // Mirror chrome: adding a rule whose id is still installed (not covered
+      // by the sweep) is rejected — the same unique-ID constraint as the
+      // dynamic ruleset. The counter-drift sweep in handleBypass removes the
+      // allocated ids before adding, so a regression that drops the sweep
+      // fails the tests instead of silently overwriting.
+      const sweptIds = new Set(removeRuleIds)
+      for (const rule of addRules) {
+        if (!sweptIds.has(rule.id) && sessionRules.has(rule.id)) {
+          throw new Error(`Rule with id ${rule.id} does not have a unique ID`)
+        }
+      }
       for (const id of removeRuleIds) sessionRules.delete(id)
       for (const rule of addRules) sessionRules.set(rule.id, rule)
     },
