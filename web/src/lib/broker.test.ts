@@ -99,7 +99,10 @@ describe("BrokerConnection", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { sockets, states } = makeHarness();
     sockets[0].message(JSON.stringify({ type: "connected", name: 5 }));
-    expect(warn).toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith("broker: dropping malformed connected message", {
+      type: "connected",
+      name: 5,
+    });
     expect(states).toEqual([]);
   });
 
@@ -107,8 +110,20 @@ describe("BrokerConnection", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { sockets, states } = makeHarness();
     sockets[0].message(JSON.stringify({ type: "sign" }));
-    expect(warn).toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith("broker: dropping malformed sign message", {
+      type: "sign",
+    });
     expect(states).toEqual([]);
+  });
+
+  it("warns on socket error without notifying and still accepts a later greeting", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { sockets, states } = makeHarness();
+    sockets[0].error();
+    expect(warn).toHaveBeenCalledWith("broker: socket error");
+    expect(states).toEqual([]);
+    sockets[0].message(greeting("lobby-1"));
+    expect(states).toEqual([{ status: "ready", kioskName: "lobby-1" }]);
   });
 
   it("retries a pre-greeting close without notifying and becomes ready on the reconnect greeting", () => {

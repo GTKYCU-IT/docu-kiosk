@@ -119,12 +119,20 @@ export class BrokerConnection {
       return;
     }
     const record = parsed as Record<string, unknown>;
-    if (record.type === "connected" && typeof record.name === "string") {
-      this.handleConnected(record.name);
+    if (record.type === "connected") {
+      if (typeof record.name === "string") {
+        this.handleConnected(record.name);
+      } else {
+        this.drop("malformed connected message", record);
+      }
       return;
     }
-    if (record.type === "sign" && typeof record.url === "string") {
-      this.handleSign(record.url);
+    if (record.type === "sign") {
+      if (typeof record.url === "string") {
+        this.handleSign(record.url);
+      } else {
+        this.drop("malformed sign message", record);
+      }
       return;
     }
     this.drop("unknown message", record);
