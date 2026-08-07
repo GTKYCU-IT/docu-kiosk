@@ -101,7 +101,17 @@ export async function handleBypass(url: string) {
   try {
     const ruleIds = await nextBypassRuleIds()
     const rules = buildBypassRules(tab.id, ruleIds[0])
-    await chrome.declarativeNetRequest.updateSessionRules({ addRules: rules })
+    // Sweep-then-add in one atomic call: if the counter ever drifts from the
+    // installed rules (e.g. storage.session cleared on extension reload while
+    // session rules persisted), stale rules with these IDs are removed first
+    // instead of rejecting the whole update with "Rule with id N does not
+    // have a unique ID". Live rules never carry these IDs — the counter is
+    // monotonic within a browser session — so this cannot disable another
+    // tab's bypass.
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: ruleIds,
+      addRules: rules
+    })
     bypassRuleIds.set(tab.id, ruleIds)
 
     await chrome.tabs.update(tab.id, { url, active: true })

@@ -281,9 +281,7 @@ describe('bypass tab cleanup', () => {
     // The tab was created with id 99
     onRemovedListener!(99)
 
-    const removalCalls = updateSessionRules.mock.calls.filter(
-      (c) => c[0].removeRuleIds?.length === 2
-    )
+    const removalCalls = updateSessionRules.mock.calls.filter(removalOnly)
     expect(removalCalls).toHaveLength(1)
   })
 
@@ -327,16 +325,12 @@ describe('multi-tab bypass', () => {
     // Close tab 10
     onRemovedListener!(10)
 
-    const removalCalls = updateSessionRules.mock.calls.filter(
-      (c) => c[0].removeRuleIds?.length === 2
-    )
+    const removalCalls = updateSessionRules.mock.calls.filter(removalOnly)
     expect(removalCalls).toHaveLength(1)
 
     // Close tab 20
     onRemovedListener!(20)
-    const allRemovalCalls = updateSessionRules.mock.calls.filter(
-      (c) => c[0].removeRuleIds?.length === 2
-    )
+    const allRemovalCalls = updateSessionRules.mock.calls.filter(removalOnly)
     expect(allRemovalCalls).toHaveLength(2)
     // The two removal calls should remove different rule ID sets
     expect(allRemovalCalls[0][0].removeRuleIds).not.toEqual(
@@ -378,6 +372,23 @@ describe('multi-tab bypass', () => {
 
     expect(lastBypassIds()).toEqual([100, 101])
   })
+
+  it('sweeps stale rules with colliding IDs before adding', async () => {
+    // Simulates the drift that caused "Rule with id 100 does not have a
+    // unique ID": the counter fell back to 100 while session rules 100/101
+    // from an earlier lifetime were still installed. The install call must
+    // remove those IDs in the same atomic update instead of failing.
+    sessionStore.clear() // counter drifts back to 100
+    tabsCreate.mockResolvedValue({ id: 50 })
+
+    await handleBypass('https://demo.docusign.net/Signing/a')
+
+    const installCall = updateSessionRules.mock.calls[updateSessionRules.mock.calls.length - 1][0] as SessionRulesUpdate
+    expect(installCall.addRules!.map((r) => r.id)).toEqual([100, 101])
+    // removeRuleIds must cover exactly the IDs being added — the sweep that
+    // makes the update idempotent against pre-installed stale rules.
+    expect(installCall.removeRuleIds).toEqual([100, 101])
+  })
 })
 
 // Last session-rule add call with two rules (bypass rules), as ID numbers.
@@ -388,4 +399,16 @@ function lastBypassIds(): number[] {
   return (addCalls[addCalls.length - 1][0].addRules as chrome.declarativeNetRequest.Rule[]).map(
     (r) => r.id
   )
+}
+
+type SessionRulesUpdate = {
+  addRules?: chrome.declarativeNetRequest.Rule[]
+  removeRuleIds?: number[]
+}
+
+// Removal-only calls (tab-close cleanup) have removeRuleIds but no addRules —
+// bypass installs sweep+add in a single call.
+function removalOnly(call: unknown[]): boolean {
+  const update = call[0] as SessionRulesUpdate | undefined
+  return update?.removeRuleIds?.length === 2 && !update.addRules
 }
