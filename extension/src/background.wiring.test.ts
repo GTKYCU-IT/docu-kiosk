@@ -15,6 +15,18 @@ const webNavOnBeforeNavigate = vi.fn()
 const storageManagedGet = vi.fn()
 const storageLocalGet = vi.fn()
 
+// Stateful storage.session fake: like the real API, values survive
+// service-worker restarts (module re-imports) and are cleared on "browser
+// restart" (sessionStore.clear()).
+const sessionStore = new Map<string, number>()
+const storageSessionGet = vi.fn(async (key: string) => {
+  const value = sessionStore.get(key)
+  return value === undefined ? {} : { [key]: value }
+})
+const storageSessionSet = vi.fn(async (items: Record<string, number>) => {
+  for (const [key, value] of Object.entries(items)) sessionStore.set(key, value)
+})
+
 vi.stubGlobal('chrome', {
   declarativeNetRequest: {
     updateDynamicRules,
@@ -28,12 +40,14 @@ vi.stubGlobal('chrome', {
   tabs: {
     create: tabsCreate,
     update: tabsUpdate,
+    remove: vi.fn(),
     onRemoved: { addListener: onRemovedAddListener }
   },
   webNavigation: { onBeforeNavigate: { addListener: webNavOnBeforeNavigate } },
   storage: {
     managed: { get: storageManagedGet },
-    local: { get: storageLocalGet }
+    local: { get: storageLocalGet },
+    session: { get: storageSessionGet, set: storageSessionSet }
   }
 })
 
@@ -328,4 +342,50 @@ describe('multi-tab bypass', () => {
     expect(allRemovalCalls[0][0].removeRuleIds).not.toEqual(
       allRemovalCalls[1][0].removeRuleIds)
   })
+
+  it('continues rule IDs across service-worker restarts', async () => {
+    // MV3 workers are killed after ~30s idle; the next bypass runs in a fresh
+    // module instance while the session rules from the previous worker are
+    // still installed. The persisted counter must not reuse their IDs.
+    tabsCreate.mockResolvedValue({ id: 30 })
+    await handleBypass('https://demo.docusign.net/Signing/a')
+    const before = lastBypassIds()
+
+    // Dynamic import is required here: simulating a service-worker restart
+    // means deliberately re-executing the module top-level, which a static
+    // import cannot do.
+    vi.resetModules()
+    const fresh = await import('./background')
+    tabsCreate.mockResolvedValue({ id: 31 })
+    await fresh.handleBypass('https://demo.docusign.net/Signing/b')
+
+    const after = lastBypassIds()
+    expect(after).toEqual([before[0] + 2, before[1] + 2])
+  })
+
+  it('restarts rule IDs at 100 after a browser restart', async () => {
+    // A browser restart clears both the session rules and storage.session —
+    // the counter must fall back to the start.
+    await handleBypass('https://demo.docusign.net/Signing/a')
+    sessionStore.clear()
+
+    // Dynamic import required: fresh module instance to model the restarted
+    // worker (see the service-worker-restart test above).
+    vi.resetModules()
+    const fresh = await import('./background')
+    tabsCreate.mockResolvedValue({ id: 40 })
+    await fresh.handleBypass('https://demo.docusign.net/Signing/b')
+
+    expect(lastBypassIds()).toEqual([100, 101])
+  })
 })
+
+// Last session-rule add call with two rules (bypass rules), as ID numbers.
+function lastBypassIds(): number[] {
+  const addCalls = updateSessionRules.mock.calls.filter(
+    (c) => c[0].addRules?.length === 2
+  )
+  return (addCalls[addCalls.length - 1][0].addRules as chrome.declarativeNetRequest.Rule[]).map(
+    (r) => r.id
+  )
+}

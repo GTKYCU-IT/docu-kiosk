@@ -16,7 +16,36 @@ export const SIGNING_URL_FILTERS: string[] = [
 ]
 /** Rule IDs 1–4 are the intercept patterns. IDs 5–99 are reserved. IDs 100+ are per-tab bypass allow rules. */
 const BYPASS_RULE_START_ID = 100
-let nextBypassRuleId = BYPASS_RULE_START_ID
+
+/**
+ * Session-scoped DNR rules survive service-worker restarts (MV3 workers are
+ * killed after ~30s idle), but module state does not — so the next free
+ * bypass rule ID lives in chrome.storage.session, which has exactly the same
+ * lifetime as the session rules: it survives worker restarts and is cleared
+ * on browser restart. Without this, a bypass after a worker restart reused
+ * IDs 100/101 while the previous tab's rules were still installed, and Chrome
+ * rejected the update ("Rule with id 100 does not have a unique ID").
+ */
+const BYPASS_ID_STORAGE_KEY = 'bypassNextRuleId'
+
+// Serializes ID allocation across concurrent bypass requests within one
+// worker lifetime (storage.session has no compare-and-swap primitive).
+let bypassAllocationChain: Promise<void> = Promise.resolve()
+
+async function nextBypassRuleIds(): Promise<number[]> {
+  const result = bypassAllocationChain.then(async () => {
+    const stored = await chrome.storage.session.get(BYPASS_ID_STORAGE_KEY)
+    const raw = stored[BYPASS_ID_STORAGE_KEY]
+    const next = typeof raw === 'number' && Number.isInteger(raw) ? raw : BYPASS_RULE_START_ID
+    await chrome.storage.session.set({ [BYPASS_ID_STORAGE_KEY]: next + 2 })
+    return [next, next + 1]
+  })
+  bypassAllocationChain = result.then(
+    () => undefined,
+    () => undefined
+  )
+  return result
+}
 
 const ALL_RULE_IDS = [1, 2, 3, 4]
 const BYPASS_HOSTS = ['*://*.docusign.net/*', '*://*.docusign.com/*']
@@ -66,19 +95,19 @@ export function buildBypassRules(tabId: number, startId: number): chrome.declara
  * multi-page signing flows and subsequent same-tab navigation.
  */
 export async function handleBypass(url: string) {
+  const tab = await chrome.tabs.create({ url: 'about:blank', active: false })
+  if (!tab.id) throw new Error('tab has no id')
+
   try {
-    const tab = await chrome.tabs.create({ url: 'about:blank', active: false })
-    if (!tab.id) throw new Error('tab has no id')
-
-    const ruleIds = [nextBypassRuleId, nextBypassRuleId + 1]
-    const rules = buildBypassRules(tab.id, nextBypassRuleId)
-    nextBypassRuleId += 2
-
+    const ruleIds = await nextBypassRuleIds()
+    const rules = buildBypassRules(tab.id, ruleIds[0])
     await chrome.declarativeNetRequest.updateSessionRules({ addRules: rules })
     bypassRuleIds.set(tab.id, ruleIds)
 
     await chrome.tabs.update(tab.id, { url, active: true })
   } catch (err) {
+    // A failed bypass would otherwise leave a blank orphan tab behind.
+    void chrome.tabs.remove(tab.id)
     console.error('[docu-kiosk] bypass failed:', err)
     throw err
   }
