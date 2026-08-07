@@ -64,17 +64,31 @@ jobs:
       - name: Extract version and image name
         id: version
         run: |
-          echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
+          version="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "version=$version" >> $GITHUB_OUTPUT
+          echo "image=$image" >> $GITHUB_OUTPUT
+          if [[ "$version" == *-* ]]; then
+            # Prerelease (e.g. 2.2.8-rc.1): never touch :latest.
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "tags<<EOF" >> $GITHUB_OUTPUT
+            echo "$image:$version" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "tags<<EOF" >> $GITHUB_OUTPUT
+            echo "$image:$version" >> $GITHUB_OUTPUT
+            echo "$image:latest" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
       - uses: docker/build-push-action@v7
         with:
           context: .
           push: true
-          tags: |
-            ${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}
-            ${{ steps.version.outputs.image }}:latest
+          tags: ${{ steps.version.outputs.tags }}
       - uses: softprops/action-gh-release@v3
         with:
+          prerelease: ${{ steps.version.outputs.prerelease }}
           files: |
             extension/public/docu-kiosk.crx
             extension/public/update.xml
