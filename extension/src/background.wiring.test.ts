@@ -166,6 +166,28 @@ describe('config', () => {
     const cfg = await getConfig()
     expect(cfg.brokerUrl).toBe('https://broker.managed')
   })
+
+  it('strips a trailing slash from the local brokerUrl', async () => {
+    storageManagedGet.mockResolvedValue({})
+    storageLocalGet.mockResolvedValue({ brokerUrl: 'https://broker.local/' })
+    const cfg = await getConfig()
+    expect(cfg.brokerUrl).toBe('https://broker.local')
+  })
+
+  it('strips trailing slashes from the managed brokerUrl and kioskUrl', async () => {
+    storageManagedGet.mockResolvedValue({ brokerUrl: 'https://broker.managed///', kioskUrl: 'https://kiosk.local/' })
+    storageLocalGet.mockResolvedValue({ brokerUrl: 'https://broker.local' })
+    const cfg = await getConfig()
+    expect(cfg.brokerUrl).toBe('https://broker.managed')
+    expect(cfg.kioskUrl).toBe('https://kiosk.local')
+  })
+
+  it('leaves a slash-less brokerUrl unchanged', async () => {
+    storageManagedGet.mockResolvedValue({})
+    storageLocalGet.mockResolvedValue({ brokerUrl: 'https://broker.local' })
+    const cfg = await getConfig()
+    expect(cfg.brokerUrl).toBe('https://broker.local')
+  })
 })
 
 describe('bypass message handler', () => {
