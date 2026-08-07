@@ -14,17 +14,21 @@ export default defineManifest((config) => ({
     default_icon: {
       48: 'public/logo.png'
     },
-    default_popup: 'src/intercepted/index.html',
   },
 
   permissions: [
     'declarativeNetRequest',
     'storage',
+    'tabs',
+    'webNavigation',
   ],
 
   host_permissions: [
+    // docusign.net covers the signing pods (demo, na2, www, ...); apps.docusign.com
+    // is the new embedded-signing host. app.docusign.com (manage/send UI) stays
+    // outside the extension's reach so staff can use DocuSign normally.
     'https://*.docusign.net/*',
-    'https://*.docusign.com/*',
+    'https://apps.docusign.com/*',
     'https://*.local/*',
     ...(config.mode === 'development' ? ['http://localhost/*'] : []),
   ],
@@ -33,7 +37,7 @@ export default defineManifest((config) => ({
     "service_worker": "src/background.ts"
   },
 
-  options_page: 'src/intercepted/index.html',
+  options_page: 'src/options/index.html',
 
   web_accessible_resources: [{
     resources: [
