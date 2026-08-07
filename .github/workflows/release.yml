@@ -54,14 +54,14 @@ jobs:
         run: |
           wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo apt-get install -y /tmp/chrome.deb
-- name: Pack signed CRX (stable only — Chrome requires numeric version)
-  if: steps.version.outputs.prerelease == 'false'
-  run: npm run pack
-  working-directory: extension
-- name: Prerelease note (CRX skipped)
-  if: steps.version.outputs.prerelease == 'true'
-  run: |
-    echo "Prerelease — CRX pack skipped (Chrome manifest version can't contain '-'." >> $GITHUB_STEP_SUMMARY
+      - name: Pack signed CRX (stable only — Chrome requires numeric version)
+        if: steps.version.outputs.prerelease == 'false'
+        run: npm run pack
+        working-directory: extension
+      - name: Prerelease note (CRX skipped)
+        if: steps.version.outputs.prerelease == 'true'
+        run: |
+          echo "Prerelease — CRX pack skipped (Chrome manifest version can't contain '-'." >> $GITHUB_STEP_SUMMARY
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
