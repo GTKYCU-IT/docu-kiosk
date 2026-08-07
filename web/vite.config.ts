@@ -20,7 +20,4 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
   },
-  test: {
-    passWithNoTests: true,
-  },
 })
