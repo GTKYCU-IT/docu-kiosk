@@ -2,7 +2,7 @@
         dev dev-web dev-broker run \
         test test-race vet \
         docker-build docker-up docker-down \
-        release \
+        release rc \
         migrate migrate-down migrate-status migrate-create sqlc-gen tools \
         help
 
@@ -49,13 +49,25 @@ clean: ## Remove build artifacts
 	rm -rf web/dist extension/dist tmp
 
 ## Release
-release: ## Cut a release — bumps extension version, tags, and pushes (VERSION=x.y.z)
+release: ## Cut a stable release — tags vX.Y.Z, publishes :latest + signed CRX (VERSION=x.y.z)
 	@test -n "$(VERSION)" || (echo "Error: VERSION is not set. Usage: make release VERSION=x.y.z"; exit 1)
 	@test -z "$$(git status --porcelain)" || (echo "Error: working tree is dirty"; exit 1)
-	cd extension && npm version $(VERSION) --no-git-tag-version
+	cd extension && npm version $(VERSION) --no-git-tag-version || true
 	git add extension/package.json extension/package-lock.json
-	git commit -m "chore: bump to $(VERSION)"
+	@if git diff --cached --quiet; then echo "extension already at $(VERSION)"; else git commit -m "chore: bump to $(VERSION)"; fi
 	git tag v$(VERSION)
+	git push origin main v$(VERSION)
+
+rc: ## Cut a release candidate — tag vX.Y.Z-rc.N, extension stays at Chrome-safe X.Y.Z (VERSION=x.y.z-rc.N)
+	@test -n "$(VERSION)" || (echo "Error: VERSION is not set. Usage: make rc VERSION=2.2.9-rc.1"; exit 1)
+	@echo "$(VERSION)" | grep -q -- '-rc\.' || (echo "Error: VERSION must be a prerelease like 2.2.9-rc.1"; exit 1)
+	@test -z "$$(git status --porcelain)" || (echo "Error: working tree is dirty"; exit 1)
+	@stable=$$(echo "$(VERSION)" | sed -E 's/-rc\.[0-9]+$$//'); \
+	cd extension && npm version "$$stable" --no-git-tag-version || true; \
+	cd ..; \
+	git add extension/package.json extension/package-lock.json; \
+	if git diff --cached --quiet; then echo "extension already at $$stable"; else git commit -m "chore: bump to $$stable (for $(VERSION))"; fi; \
+	git tag v$(VERSION); \
 	git push origin main v$(VERSION)
 
 ## Docker

@@ -39,6 +39,10 @@ make extension  # Extension → extension/dist/
 make clean      # remove build artifacts
 ```
 
+Releases go through an RC → staging → stable pipeline; see
+[`docs/release-process.md`](docs/release-process.md) (`make rc VERSION=2.2.9-rc.1`,
+then `make release VERSION=2.2.9`).
+
 Load `extension/dist/` as an unpacked extension at `edge://extensions` → "Load unpacked" to test the extension locally. The extension uses `declarativeNetRequest` (no enterprise policy required) so load-unpacked works for all core functionality.
 
 ## Configuration
