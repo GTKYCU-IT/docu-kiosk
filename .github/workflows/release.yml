@@ -47,26 +47,6 @@ jobs:
           cache-dependency-path: extension/package-lock.json
       - run: npm ci
         working-directory: extension
-      - name: Write signing key
-        run: echo "${{ secrets.DIST_PEM_B64 }}" | base64 -d > dist.pem
-        working-directory: extension
-      - name: Install Chrome
-        run: |
-          wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y /tmp/chrome.deb
-      - name: Pack signed CRX (stable only — Chrome requires numeric version)
-        if: steps.version.outputs.prerelease == 'false'
-        run: npm run pack
-        working-directory: extension
-      - name: Prerelease note (CRX skipped)
-        if: steps.version.outputs.prerelease == 'true'
-        run: |
-          echo "Prerelease — CRX pack skipped (Chrome manifest version can't contain '-'." >> $GITHUB_STEP_SUMMARY
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Extract version and image name
         id: version
         run: |
@@ -87,6 +67,26 @@ jobs:
             echo "$image:latest" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
           fi
+      - name: Write signing key
+        run: echo "${{ secrets.DIST_PEM_B64 }}" | base64 -d > dist.pem
+        working-directory: extension
+      - name: Install Chrome
+        run: |
+          wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y /tmp/chrome.deb
+      - name: Pack signed CRX (stable only — Chrome requires numeric version)
+        if: steps.version.outputs.prerelease == 'false'
+        run: npm run pack
+        working-directory: extension
+      - name: Prerelease note (CRX skipped)
+        if: steps.version.outputs.prerelease == 'true'
+        run: |
+          echo "Prerelease — CRX pack skipped (Chrome manifest version can't contain '-'." >> $GITHUB_STEP_SUMMARY
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v7
         with:
           context: .
