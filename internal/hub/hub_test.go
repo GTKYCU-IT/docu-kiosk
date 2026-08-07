@@ -186,7 +186,7 @@ func waitFor(t *testing.T, condition func() bool) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("condition not met within 2 seconds")
+	t.Fatal("condition not met within 5 seconds")
 }
 
 // startSession runs runSession in a goroutine and returns the conn, a done
@@ -272,7 +272,10 @@ func TestRunSessionPingFailureClosesSession(t *testing.T) {
 	fc.pingErr = errors.New("ping timeout")
 	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
 
-	waitFor(t, func() bool { return slices.Contains(h.Connected(), id) })
+	// The session may register and tear down (5ms ping interval) before the
+	// first poll, so assert on the recorded greeting write instead: it is
+	// written after registration and persists after teardown.
+	waitFor(t, func() bool { return len(fc.recordedWrites()) >= 1 })
 	waitFor(t, func() bool { return len(h.Connected()) == 0 })
 }
 
@@ -425,6 +428,13 @@ func TestSendReconnectMidWriteIsWriteFailed(t *testing.T) {
 
 	// Gate connA's Writes: Send grabs connA and blocks inside Write.
 	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
 	entered := make(chan struct{})
 	connA.setWriteGate(release, entered)
 	sendDone := make(chan error, 1)
@@ -479,6 +489,158 @@ func TestSendReconnectMidWriteIsWriteFailed(t *testing.T) {
 	}
 	if got != msg {
 		t.Errorf("expected %+v, got %+v", msg, got)
+	}
+}
+
+func TestSendReconnectMidWriteWriteErrorIsWriteFailed(t *testing.T) {
+	h, buf := newTestHub(nil)
+	id := uuid.New()
+
+	// connA is the live session; its greeting succeeds before we arm the gate.
+	connA := newFakeConn()
+	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connA)
+	waitFor(t, func() bool {
+		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
+	})
+
+	// The write itself will fail; the reconnect must not mask the underlying
+	// error or drop it from the log.
+	underlying := errors.New("socket closed")
+	connA.setWriteErr(underlying)
+
+	// Gate connA's Writes: Send grabs connA and blocks inside Write.
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	entered := make(chan struct{})
+	connA.setWriteGate(release, entered)
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- h.Send(context.Background(), id, protocol.NewSign("https://example.com"))
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("send did not block inside Write")
+	}
+
+	// While Send is blocked, the kiosk reconnects and replaces the session.
+	connB := newFakeConn()
+	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connB)
+	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
+
+	// Release the stale write; Send must report the failed write against the
+	// lost session, wrapping both ErrWriteFailed and the underlying error.
+	close(release)
+	select {
+	case err := <-sendDone:
+		if !errors.Is(err, ErrWriteFailed) {
+			t.Errorf("expected ErrWriteFailed, got %v", err)
+		}
+		if errors.Is(err, ErrNotConnected) {
+			t.Error("mid-write reconnect must not be ErrNotConnected")
+		}
+		if !errors.Is(err, underlying) {
+			t.Errorf("expected %v to wrap underlying write error %v", err, underlying)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("send did not return after write released")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "push lost: kiosk reconnected mid-write") {
+		t.Errorf("expected log to mention reconnected mid-write, got: %s", logged)
+	}
+	if !strings.Contains(logged, underlying.Error()) {
+		t.Errorf("expected log to contain underlying error %q, got: %s", underlying, logged)
+	}
+	if !strings.Contains(logged, id.String()) {
+		t.Errorf("expected log to contain kiosk id %s, got: %s", id, logged)
+	}
+
+	// The replacement session is still live and still accepts writes.
+	if got := h.Connected(); len(got) != 1 || got[0] != id {
+		t.Fatalf("expected exactly session %v, got %v", id, got)
+	}
+	msg := protocol.NewSign("https://docusign.example.com/signing/def456")
+	if err := h.Send(context.Background(), id, msg); err != nil {
+		t.Fatalf("send to replacement session: %v", err)
+	}
+	var got protocol.Sign
+	if err := json.Unmarshal(connB.lastWrite(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got != msg {
+		t.Errorf("expected %+v, got %+v", msg, got)
+	}
+}
+
+func TestSendDisconnectMidWriteIsWriteFailed(t *testing.T) {
+	h, buf := newTestHub(nil)
+	id := uuid.New()
+
+	// connA is the live session; its greeting succeeds before we arm the gate.
+	connA := newFakeConn()
+	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connA)
+	waitFor(t, func() bool {
+		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
+	})
+
+	// Gate connA's Writes: Send grabs connA and blocks inside Write.
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	entered := make(chan struct{})
+	connA.setWriteGate(release, entered)
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- h.Send(context.Background(), id, protocol.NewSign("https://example.com"))
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("send did not block inside Write")
+	}
+
+	// While Send is blocked, the kiosk disconnects: teardown deletes the
+	// session entry. CloseNow runs after the delete in the deferred chain, so
+	// observing isClosed proves the entry is gone before we release the write.
+	connA.closeRead()
+	waitFor(t, func() bool { return connA.isClosed() })
+
+	// Release the write; the session is gone, so Send must report the loss
+	// instead of silently reporting success.
+	close(release)
+	select {
+	case err := <-sendDone:
+		if !errors.Is(err, ErrWriteFailed) {
+			t.Errorf("expected ErrWriteFailed, got %v", err)
+		}
+		if errors.Is(err, ErrNotConnected) {
+			t.Error("mid-write disconnect must not be ErrNotConnected")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("send did not return after write released")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "push lost: kiosk disconnected mid-write") {
+		t.Errorf("expected log to mention disconnected mid-write, got: %s", logged)
+	}
+	if !strings.Contains(logged, id.String()) {
+		t.Errorf("expected log to contain kiosk id %s, got: %s", id, logged)
 	}
 }
 
