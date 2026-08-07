@@ -20,14 +20,22 @@ import (
 	"github.com/calvertjadon/docu-kiosk/internal/config"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
+	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/calvertjadon/docu-kiosk/internal/version"
 	"github.com/felixge/httpsnoop"
 	"github.com/google/uuid"
 )
 
+// kioskHub is the session-module surface the HTTP handlers consume.
+type kioskHub interface {
+	Serve(w http.ResponseWriter, r *http.Request, kioskIP string)
+	Send(ctx context.Context, id uuid.UUID, msg protocol.Message) error
+	Connected() []uuid.UUID
+}
+
 type server struct {
 	db             *database.Queries
-	hub            *hub.Hub
+	hub            kioskHub
 	authModule     *auth.AuthModule
 	httpServer     *http.Server
 	logger         *slog.Logger
@@ -114,7 +122,7 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 
 	s := &server{
 		db:             db,
-		hub:            hub.New(),
+		hub:            hub.New(kioskStore{db}, logger),
 		authModule:     authModule,
 		port:           cfg.Port,
 		logger:         logger,

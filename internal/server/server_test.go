@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/calvertjadon/docu-kiosk/internal/config"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
+	"github.com/calvertjadon/docu-kiosk/internal/hub"
+	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/pressly/goose/v3"
@@ -412,5 +415,64 @@ func TestRegisterThenConnect(t *testing.T) {
 
 	if len(s.hub.Connected()) != 1 {
 		t.Errorf("expected 1 kiosk in hub, got %v", s.hub.Connected())
+	}
+}
+
+// stubHub is a kioskHub fake for handler tests.
+type stubHub struct {
+	sendErr error
+	served  bool
+}
+
+func (sh *stubHub) Serve(w http.ResponseWriter, r *http.Request, kioskIP string) {
+	sh.served = true
+}
+
+func (sh *stubHub) Send(ctx context.Context, id uuid.UUID, msg protocol.Message) error {
+	return sh.sendErr
+}
+
+func (sh *stubHub) Connected() []uuid.UUID {
+	return nil
+}
+
+func TestPushErrorMapping(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "not connected", err: hub.ErrNotConnected, want: http.StatusNotFound},
+		{name: "write failed", err: hub.ErrWriteFailed, want: http.StatusInternalServerError},
+		{name: "arbitrary error", err: errors.New("boom"), want: http.StatusInternalServerError},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &server{
+				hub:    &stubHub{sendErr: tc.err},
+				logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			}
+			req := httptest.NewRequest("POST", "/api/kiosks/"+uuid.NewString()+"/sessions", strings.NewReader(`{"url":"https://example.com"}`))
+			req.SetPathValue("id", uuid.NewString())
+			rec := httptest.NewRecorder()
+			s.handlePush(rec, req)
+			if rec.Code != tc.want {
+				t.Errorf("expected %d, got %d", tc.want, rec.Code)
+			}
+		})
+	}
+}
+
+func TestHandleWSDelegatesToServe(t *testing.T) {
+	sh := &stubHub{}
+	s := &server{
+		hub:    sh,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	req := httptest.NewRequest("GET", "/ws", nil)
+	rec := httptest.NewRecorder()
+	s.handleWS(rec, req)
+	if !sh.served {
+		t.Error("expected handleWS to delegate to hub.Serve")
 	}
 }

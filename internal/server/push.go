@@ -29,11 +29,9 @@ func (s *server) handlePush(w http.ResponseWriter, r *http.Request) {
 	msg := protocol.NewSign(body.URL)
 	if err := s.hub.Send(r.Context(), kioskID, msg); err != nil {
 		if errors.Is(err, hub.ErrNotConnected) {
-			s.logger.Warn("push failed: kiosk not connected", "kiosk_id", kioskID)
 			http.Error(w, "kiosk not connected", http.StatusNotFound)
 			return
 		}
-		s.logger.Error("push failed", "error", err, "kiosk_id", kioskID)
 		http.Error(w, "push failed", http.StatusInternalServerError)
 		return
 	}
