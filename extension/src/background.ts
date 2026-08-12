@@ -101,9 +101,14 @@ export async function handleBypass(url: string) {
 }
 
 async function removeBypassRules(tabId: number) {
-  const ruleIds = await dnrPort.forgetBypassTab(tabId)
-  if (!ruleIds) return
-  void dnrPort.removeBypassRules(ruleIds)
+  try {
+    // forgetBypassTab removes the rules first, then the mapping — a failure
+    // leaves the mapping intact and is logged here rather than surfacing as
+    // an unhandled rejection.
+    await dnrPort.forgetBypassTab(tabId)
+  } catch (err) {
+    console.error('[docu-kiosk] bypass cleanup failed:', err)
+  }
 }
 
 export async function installRules() {

@@ -382,4 +382,35 @@ describe('bypass failure cleanup', () => {
     await expect(mod.handleBypass(testUrl)).rejects.toThrow('boom')
     expect(tabsRemove).toHaveBeenCalledWith(99)
   })
+
+  it('still navigates and logs when persisting the tab mapping fails', async () => {
+    vi.spyOn(holder.fake, 'rememberBypassTab').mockRejectedValueOnce(new Error('storage full'))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await mod.handleBypass(testUrl)
+
+    // The rules are installed; a persistence failure must not fail the bypass.
+    expect(tabsUpdate).toHaveBeenCalledWith(99, { url: testUrl, active: true })
+    expect(consoleError).toHaveBeenCalledWith(
+      '[docu-kiosk] bypass state persist failed:',
+      expect.any(Error)
+    )
+  })
+
+  it('logs a failed tab-close cleanup instead of rejecting unhandled', async () => {
+    await mod.handleBypass(testUrl)
+    vi.spyOn(holder.fake, 'forgetBypassTab').mockRejectedValueOnce(new Error('storage full'))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    onRemovedListener!(99)
+    await vi.waitFor(() => {
+      expect(consoleError).toHaveBeenCalledWith(
+        '[docu-kiosk] bypass cleanup failed:',
+        expect.any(Error)
+      )
+    })
+    // Nothing was torn down on failure — rules and mapping stay consistent.
+    expect(holder.fake.sessionRules.size).toBe(2)
+    expect(holder.fake.tabRuleIds.size).toBe(1)
+  })
 })

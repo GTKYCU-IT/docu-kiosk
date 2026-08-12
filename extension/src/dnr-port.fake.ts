@@ -69,10 +69,6 @@ export function createFakeDnrPort(): FakeDnrPort {
       for (const rule of addRules) sessionRules.set(rule.id, rule)
     },
 
-    async removeBypassRules(ruleIds: number[]): Promise<void> {
-      for (const id of ruleIds) sessionRules.delete(id)
-    },
-
     async allocateBypassRuleIds(count: number): Promise<number[]> {
       const result = stateChain.then(() => {
         const ids = Array.from({ length: count }, (_, i) => nextBypassId + i)
@@ -100,7 +96,11 @@ export function createFakeDnrPort(): FakeDnrPort {
     async forgetBypassTab(tabId: number): Promise<number[] | undefined> {
       const result = stateChain.then(() => {
         const ruleIds = tabRuleIds.get(tabId)
-        if (ruleIds !== undefined) tabRuleIds.delete(tabId)
+        if (ruleIds === undefined) return undefined
+        // Mirrors the chrome adapter: rules are removed before the mapping is
+        // forgotten.
+        for (const id of ruleIds) sessionRules.delete(id)
+        tabRuleIds.delete(tabId)
         return ruleIds
       })
       stateChain = result.then(

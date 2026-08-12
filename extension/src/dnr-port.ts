@@ -26,9 +26,11 @@ const BYPASS_TAB_MAP_STORAGE_KEY = 'bypassTabRuleIds'
 // (storage.session has no compare-and-swap primitive).
 let bypassStateChain: Promise<void> = Promise.resolve()
 
-// Reads the persisted tab→rule map. A stored value of the wrong shape falls
-// back to an empty map rather than failing cleanup (entry-level corruption is
-// dropped too).
+// Reads the persisted tab→rule map. storage.session stores JSON-serializable
+// values only, hence a plain Record rather than a Map — object keys come back
+// as strings, so entries are validated via Number(key) round-trip. A stored
+// value of the wrong shape falls back to an empty map rather than failing
+// cleanup (entry-level corruption is dropped too).
 async function readBypassTabMap(): Promise<Record<number, number[]>> {
   const stored = await chrome.storage.session.get(BYPASS_TAB_MAP_STORAGE_KEY)
   const raw: unknown = stored[BYPASS_TAB_MAP_STORAGE_KEY]
@@ -52,13 +54,11 @@ export interface DnrPort {
   installInterceptRules(addRules: chrome.declarativeNetRequest.Rule[], removeRuleIds: number[]): Promise<void>
   /** Sweep-then-add bypass allow rules (session scope). */
   addBypassRules(addRules: chrome.declarativeNetRequest.Rule[], removeRuleIds: number[]): Promise<void>
-  /** Remove bypass allow rules (session scope). */
-  removeBypassRules(ruleIds: number[]): Promise<void>
   /** Allocate `count` consecutive bypass rule IDs, persisted across service-worker restarts. */
   allocateBypassRuleIds(count: number): Promise<number[]>
   /** Persist the tab→rule mapping so tab-close cleanup survives worker restarts. */
   rememberBypassTab(tabId: number, ruleIds: number[]): Promise<void>
-  /** Remove and return a tab's mapped rule IDs, or undefined when unmapped. */
+  /** Remove a tab's bypass rules and forget its mapping; returns the removed rule IDs, or undefined when unmapped. */
   forgetBypassTab(tabId: number): Promise<number[] | undefined>
 }
 
@@ -76,10 +76,6 @@ export function createChromeDnrPort(): DnrPort {
       removeRuleIds: number[]
     ): Promise<void> {
       await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds, addRules })
-    },
-
-    async removeBypassRules(ruleIds: number[]): Promise<void> {
-      await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds })
     },
 
     async allocateBypassRuleIds(count: number): Promise<number[]> {
@@ -115,6 +111,11 @@ export function createChromeDnrPort(): DnrPort {
         const map = await readBypassTabMap()
         const ruleIds = map[tabId]
         if (ruleIds === undefined) return undefined
+        // Remove the rules BEFORE forgetting the mapping: a failed removal
+        // leaves the mapping intact so the rules keep an owner (a stale entry
+        // is overwritten if the tabId is ever reused) instead of orphaning
+        // them for the rest of the browser session.
+        await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds })
         delete map[tabId]
         await chrome.storage.session.set({ [BYPASS_TAB_MAP_STORAGE_KEY]: map })
         return ruleIds
