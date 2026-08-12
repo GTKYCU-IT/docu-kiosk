@@ -15,6 +15,7 @@ import (
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/google/uuid"
 	"github.com/pressly/goose/v3"
+	_ "modernc.org/sqlite" // register the sqlite driver for newTestDB
 )
 
 // newTestDB returns a goose-migrated in-memory SQLite database, closed
@@ -172,7 +173,7 @@ func TestRegisterSameIPRenames(t *testing.T) {
 
 func TestRegisterNameTakenByOtherKiosk(t *testing.T) {
 	db := newTestDB(t)
-	m, buf := newTestModule(db)
+	m, buf := newTestModule(dbStore{Queries: db})
 	ctx := context.Background()
 
 	if err := m.Register(ctx, "10.0.0.1", "Lobby"); err != nil {
