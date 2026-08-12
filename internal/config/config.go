@@ -37,8 +37,11 @@ type Config struct {
 // Token-lifetime defaults. These are the only place token lifetimes are
 // decided; AuthModule receives them as parameters.
 const (
-	defaultJWTTTL     = 15 * time.Second
-	defaultRefreshTTL = 60 * 24 * time.Hour
+	// DefaultJWTTTL and DefaultRefreshTTL are the broker's token-lifetime
+	// policy. They are the only place token lifetimes are decided: tests
+	// reference them instead of re-hardcoding values.
+	DefaultJWTTTL     = 15 * time.Second
+	DefaultRefreshTTL = 60 * 24 * time.Hour
 )
 
 // Load reads every broker environment variable exactly once, failing fast
@@ -92,11 +95,11 @@ func Load() (Config, error) {
 	}
 
 	var err error
-	cfg.JWTTTL, err = envDuration("DOCU_KIOSK_JWT_TTL", defaultJWTTTL)
+	cfg.JWTTTL, err = envDuration("DOCU_KIOSK_JWT_TTL", DefaultJWTTTL)
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.RefreshTTL, err = envDuration("DOCU_KIOSK_REFRESH_TTL", defaultRefreshTTL)
+	cfg.RefreshTTL, err = envDuration("DOCU_KIOSK_REFRESH_TTL", DefaultRefreshTTL)
 	if err != nil {
 		return Config{}, err
 	}

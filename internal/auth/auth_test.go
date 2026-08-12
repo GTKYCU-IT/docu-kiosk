@@ -9,24 +9,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/calvertjadon/docu-kiosk/internal/config"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/google/uuid"
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
-// testJWTTTL and testRefreshTTL mirror the config defaults
-// (internal/config/config.go: defaultJWTTTL / defaultRefreshTTL); the seam
-// tests pass them to newAuthModule so token behavior matches production.
-// Keep them in sync with those constants — drift here changes token behavior
-// in tests only.
-const (
-	testJWTTTL     = 15 * time.Second
-	testRefreshTTL = 60 * 24 * time.Hour
-)
-
-// testLifetimes bundles the test TTLs for constructor call sites.
-var testLifetimes = TokenLifetimes{JWTTTL: testJWTTTL, RefreshTTL: testRefreshTTL}
+// testLifetimes bundles the config token-lifetime defaults for constructor
+// call sites, so tests exercise the same policy as production.
+var testLifetimes = TokenLifetimes{JWTTTL: config.DefaultJWTTTL, RefreshTTL: config.DefaultRefreshTTL}
 
 func newTestDB(t *testing.T) (*sql.DB, *database.Queries) {
 	t.Helper()
