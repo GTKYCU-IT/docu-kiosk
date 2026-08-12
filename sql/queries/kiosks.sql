@@ -1,4 +1,4 @@
--- name: CreateKiosk :one
+-- name: UpsertKiosk :one
 INSERT INTO kiosks (
     id,
     ip,
@@ -7,7 +7,8 @@ INSERT INTO kiosks (
     ?,
     ?,
     ?
-) RETURNING *;
+) ON CONFLICT(ip) DO UPDATE SET name = excluded.name
+RETURNING id, ip, name;
 
 -- name: GetKioskByIP :one
 SELECT
@@ -17,11 +18,19 @@ SELECT
 FROM kiosks
 WHERE ip = ?;
 
--- name: GetKioskByID :one
+-- name: GetKioskByName :one
 SELECT
     id,
     ip,
     name
 FROM kiosks
-WHERE id = ?;
+WHERE name = ?;
 
+-- name: ListKiosksByIDs :many
+SELECT
+    id,
+    ip,
+    name
+FROM kiosks
+WHERE id IN (sqlc.slice('ids'))
+ORDER BY name;

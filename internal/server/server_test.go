@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -191,6 +192,117 @@ func TestRegisterBadJSON(t *testing.T) {
 
 	if res.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", res.StatusCode)
+	}
+}
+
+func TestRegisterIdempotent(t *testing.T) {
+	_, ts := setupTestServer(t)
+	registerKiosk(t, ts, "Lobby")
+	registerKiosk(t, ts, "Lobby")
+
+	_, name := connectWS(t, ts)
+	if name != "Lobby" {
+		t.Errorf("expected greeting name Lobby, got %s", name)
+	}
+
+	res, err := http.Get(ts.URL + "/api/kiosks")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer res.Body.Close()
+
+	var kiosks []struct {
+		ID   uuid.UUID `json:"id"`
+		Name string    `json:"name"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&kiosks); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(kiosks) != 1 {
+		t.Fatalf("expected exactly 1 kiosk, got %d", len(kiosks))
+	}
+	if kiosks[0].Name != "Lobby" {
+		t.Errorf("expected name Lobby, got %s", kiosks[0].Name)
+	}
+}
+
+func TestRegisterSameIPRenames(t *testing.T) {
+	_, ts := setupTestServer(t)
+	registerKiosk(t, ts, "A")
+	registerKiosk(t, ts, "B")
+
+	_, name := connectWS(t, ts)
+	if name != "B" {
+		t.Errorf("expected greeting name B, got %s", name)
+	}
+
+	res, err := http.Get(ts.URL + "/api/kiosks")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer res.Body.Close()
+
+	var kiosks []struct {
+		ID   uuid.UUID `json:"id"`
+		Name string    `json:"name"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&kiosks); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(kiosks) != 1 {
+		t.Fatalf("expected exactly 1 kiosk, got %d", len(kiosks))
+	}
+	if kiosks[0].Name != "B" {
+		t.Errorf("expected name B, got %s", kiosks[0].Name)
+	}
+}
+
+func TestRegisterNameConflictDifferentIP(t *testing.T) {
+	db := newTestDB(t)
+	cfg := testConfig()
+	cfg.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}
+	s, err := NewServer(cfg, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.httpServer.Handler)
+	t.Cleanup(ts.Close)
+
+	registerKiosk(t, ts, "Lobby")
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/kiosks",
+		strings.NewReader(`{"name":"Lobby"}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-Forwarded-For", "10.0.0.2")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", res.StatusCode)
+	}
+
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatalf("decode body %q: %v", data, err)
+	}
+	if body.Error != "kiosk name already in use" {
+		t.Errorf("body error = %q, want %q", body.Error, "kiosk name already in use")
+	}
+	for _, leak := range []string{"sqlite", "constraint"} {
+		if strings.Contains(string(data), leak) {
+			t.Errorf("body leaks internal detail %q: %s", leak, data)
+		}
 	}
 }
 
@@ -474,5 +586,26 @@ func TestHandleWSDelegatesToServe(t *testing.T) {
 	s.handleWS(rec, req)
 	if !sh.served {
 		t.Error("expected handleWS to delegate to hub.Serve")
+	}
+}
+
+func TestRespondWithErrorOpaque(t *testing.T) {
+	s := &server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	rr := httptest.NewRecorder()
+
+	s.respondWithError(rr, "login failed", http.StatusInternalServerError,
+		errors.New("sqlite: UNIQUE constraint failed: kiosks.name"))
+
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error != "login failed" {
+		t.Errorf("expected error %q, got %q", "login failed", body.Error)
+	}
+	if strings.Contains(rr.Body.String(), "sqlite") {
+		t.Error("response body must not contain raw error text")
 	}
 }

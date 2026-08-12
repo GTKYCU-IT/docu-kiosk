@@ -2,20 +2,19 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 )
 
-// respondWithError writes a JSON error body. Error details are only appended
-// for server-side failures (5xx); client-facing messages stay opaque so
-// internal state is not leaked to callers.
+// respondWithError writes a JSON error body. Client-facing messages stay
+// opaque: error details are logged server-side only and never included in the
+// response body, so internal state is not leaked to callers.
 func (s *server) respondWithError(w http.ResponseWriter, msg string, code int, err error) {
-	if err != nil {
-		msg = fmt.Sprintf("%s: %s", msg, err)
-	}
-
 	if code >= 500 {
-		s.logger.Error("request failed", "code", code, "message", msg)
+		args := []any{"code", code, "message", msg}
+		if err != nil {
+			args = append(args, "error", err)
+		}
+		s.logger.Error("request failed", args...)
 	} else {
 		s.logger.Debug("request rejected", "code", code, "message", msg)
 	}
