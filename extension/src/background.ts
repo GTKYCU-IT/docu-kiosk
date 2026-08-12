@@ -20,12 +20,9 @@ const ALL_RULE_IDS = [1, 2, 3, 4]
 const BYPASS_HOSTS = ['*://*.docusign.net/*', '*://*.docusign.com/*']
 
 // All declarative-net-request access — intercept install, bypass add/remove,
-// and bypass-ID allocation — goes through the port. Production uses the
-// Chrome-backed adapter; tests inject the fake.
+// bypass-ID allocation, and the persisted tab→rule map — goes through the
+// port. Production uses the Chrome-backed adapter; tests inject the fake.
 const dnrPort: DnrPort = createChromeDnrPort()
-
-/** Active bypass allow-rule IDs, keyed by tabId. Used for cleanup when the tab closes. */
-const bypassRuleIds = new Map<number, number[]>()
 
 export function buildRules(interceptBaseUrl: string): chrome.declarativeNetRequest.Rule[] {
   const action: chrome.declarativeNetRequest.RuleAction = {
@@ -83,7 +80,16 @@ export async function handleBypass(url: string) {
     // counter is monotonic within a browser session — so this cannot disable
     // another tab's bypass.
     await dnrPort.addBypassRules(rules, ruleIds)
-    bypassRuleIds.set(tab.id, ruleIds)
+    // Persist the tab→rule mapping with the same lifetime as the session
+    // rules: the worker restarts long before a bypass tab closes, so cleanup
+    // cannot rely on module memory. A persistence failure leaves the rules
+    // installed (they clear on browser restart) — log it, don't fail the
+    // bypass.
+    try {
+      await dnrPort.rememberBypassTab(tab.id, ruleIds)
+    } catch (err) {
+      console.error('[docu-kiosk] bypass state persist failed:', err)
+    }
 
     await chrome.tabs.update(tab.id, { url, active: true })
   } catch (err) {
@@ -94,10 +100,9 @@ export async function handleBypass(url: string) {
   }
 }
 
-function removeBypassRules(tabId: number) {
-  const ruleIds = bypassRuleIds.get(tabId)
+async function removeBypassRules(tabId: number) {
+  const ruleIds = await dnrPort.forgetBypassTab(tabId)
   if (!ruleIds) return
-  bypassRuleIds.delete(tabId)
   void dnrPort.removeBypassRules(ruleIds)
 }
 
@@ -135,8 +140,12 @@ if (typeof globalThis.chrome !== 'undefined') {
     { url: [{ hostSuffix: 'docusign.net' }, { hostSuffix: 'docusign.com' }] }
   )
 
-  // Bypass: when a bypass tab closes, remove its allow rules.
-  chrome.tabs.onRemoved.addListener((tabId) => removeBypassRules(tabId))
+  // Bypass: when a bypass tab closes, remove its allow rules. The mapping
+  // comes from storage.session, so cleanup works even when the worker
+  // restarted since the bypass was created.
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    void removeBypassRules(tabId)
+  })
 
   // Bypass: listen for bypass requests from the intercepted page.
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

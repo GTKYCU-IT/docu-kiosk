@@ -104,6 +104,51 @@ describe('createChromeDnrPort', () => {
     const all = [...first, ...second].sort((a, b) => a - b)
     expect(all).toEqual([100, 101, 102, 103])
   })
+
+  it('remembers the tab→rule mapping in storage.session', async () => {
+    await createChromeDnrPort().rememberBypassTab(7, [100, 101])
+    expect(sessionStore.get('bypassTabRuleIds')).toEqual({ 7: [100, 101] })
+  })
+
+  it('forgets a tab mapping and returns its rule IDs', async () => {
+    const port = createChromeDnrPort()
+    await port.rememberBypassTab(7, [100, 101])
+    await expect(port.forgetBypassTab(7)).resolves.toEqual([100, 101])
+    expect(sessionStore.get('bypassTabRuleIds')).toEqual({})
+  })
+
+  it('forget returns undefined for an unmapped tab', async () => {
+    await expect(createChromeDnrPort().forgetBypassTab(7)).resolves.toBeUndefined()
+  })
+
+  it('keeps other tabs mapped when forgetting one tab', async () => {
+    const port = createChromeDnrPort()
+    await port.rememberBypassTab(7, [100, 101])
+    await port.rememberBypassTab(8, [102, 103])
+    await port.forgetBypassTab(7)
+    await expect(port.forgetBypassTab(8)).resolves.toEqual([102, 103])
+  })
+
+  it('keeps the tab→rule mapping across adapter recreation (worker restart)', async () => {
+    const first = createChromeDnrPort()
+    await first.rememberBypassTab(7, [100, 101])
+    await expect(createChromeDnrPort().forgetBypassTab(7)).resolves.toEqual([100, 101])
+  })
+
+  it('clears the tab→rule mapping with the store (browser restart)', async () => {
+    const first = createChromeDnrPort()
+    await first.rememberBypassTab(7, [100, 101])
+    sessionStore.clear()
+    await expect(createChromeDnrPort().forgetBypassTab(7)).resolves.toBeUndefined()
+  })
+
+  it('tolerates a corrupted stored tab map', async () => {
+    sessionStore.set('bypassTabRuleIds', 'garbage')
+    const port = createChromeDnrPort()
+    await expect(port.forgetBypassTab(7)).resolves.toBeUndefined()
+    await port.rememberBypassTab(7, [100, 101])
+    await expect(port.forgetBypassTab(7)).resolves.toEqual([100, 101])
+  })
 })
 
 describe('createFakeDnrPort', () => {
@@ -166,5 +211,14 @@ describe('createFakeDnrPort', () => {
     const second = await port.allocateBypassRuleIds(2)
     const all = [...first, ...second]
     expect(new Set(all).size).toBe(all.length)
+  })
+
+  it('remembers and forgets the tab→rule mapping', async () => {
+    const port = createFakeDnrPort()
+    await port.rememberBypassTab(7, [100, 101])
+    expect(port.tabRuleIds.get(7)).toEqual([100, 101])
+    await expect(port.forgetBypassTab(7)).resolves.toEqual([100, 101])
+    expect(port.tabRuleIds.size).toBe(0)
+    await expect(port.forgetBypassTab(7)).resolves.toBeUndefined()
   })
 })

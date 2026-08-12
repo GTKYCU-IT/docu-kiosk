@@ -220,7 +220,12 @@ describe('bypass tab cleanup', () => {
   it("removes the tab's session rules when the bypass tab closes", async () => {
     await mod.handleBypass(testUrl)
     onRemovedListener!(99)
-    expect(holder.fake.sessionRules.size).toBe(0)
+    // Cleanup is async (persisted mapping lookup) and fire-and-forget from
+    // the listener — wait for it to settle.
+    await vi.waitFor(() => {
+      expect(holder.fake.sessionRules.size).toBe(0)
+    })
+    expect(holder.fake.tabRuleIds.size).toBe(0)
   })
 
   it('is a no-op for unknown tab ids', () => {
@@ -249,7 +254,10 @@ describe('multi-tab bypass', () => {
     expect(rulesForTab(20)).toEqual([BYPASS_RULE_START_ID + 2, BYPASS_RULE_START_ID + 3])
 
     onRemovedListener!(10)
-    expect([...holder.fake.sessionRules.keys()]).toEqual([BYPASS_RULE_START_ID + 2, BYPASS_RULE_START_ID + 3])
+    await vi.waitFor(() => {
+      expect([...holder.fake.sessionRules.keys()]).toEqual([BYPASS_RULE_START_ID + 2, BYPASS_RULE_START_ID + 3])
+    })
+    expect([...holder.fake.tabRuleIds.keys()]).toEqual([20])
   })
 })
 
@@ -306,6 +314,64 @@ describe('service-worker and browser restarts', () => {
     expect(holder.fake.sessionRules.size).toBe(2)
     expect([...holder.fake.sessionRules.keys()]).toEqual([BYPASS_RULE_START_ID, BYPASS_RULE_START_ID + 1])
     expect(rulesForTab(60)).toEqual([BYPASS_RULE_START_ID, BYPASS_RULE_START_ID + 1])
+  })
+
+  it("removes a closed tab's rules after a service-worker restart", async () => {
+    tabsCreate.mockResolvedValue({ id: 30 })
+    await mod.handleBypass('https://demo.docusign.net/Signing/a')
+    expect(holder.fake.sessionRules.size).toBe(2)
+    expect(holder.fake.tabRuleIds.get(30)).toEqual([
+      BYPASS_RULE_START_ID,
+      BYPASS_RULE_START_ID + 1,
+    ])
+
+    // Service-worker restart: fresh module instance, but the SAME fake port —
+    // its session rules and persisted tab→rule map outlive the worker. The
+    // fresh module registered its own listeners; capture the new onRemoved.
+    vi.resetModules()
+    mod = await import('./background')
+    onRemovedListener = onRemovedAddListener.mock.calls[onRemovedAddListener.mock.calls.length - 1]?.[0]
+
+    onRemovedListener!(30)
+    await vi.waitFor(() => {
+      expect(holder.fake.sessionRules.size).toBe(0)
+    })
+    expect(holder.fake.tabRuleIds.size).toBe(0)
+  })
+
+  it("keeps other tabs' rules when one tab closes after a service-worker restart", async () => {
+    tabsCreate
+      .mockResolvedValueOnce({ id: 30 })
+      .mockResolvedValueOnce({ id: 31 })
+    await mod.handleBypass('https://demo.docusign.net/Signing/a')
+    await mod.handleBypass('https://demo.docusign.net/Signing/b')
+
+    vi.resetModules()
+    mod = await import('./background')
+    onRemovedListener = onRemovedAddListener.mock.calls[onRemovedAddListener.mock.calls.length - 1]?.[0]
+
+    onRemovedListener!(30)
+    await vi.waitFor(() => {
+      expect(holder.fake.sessionRules.size).toBe(2)
+    })
+    expect(rulesForTab(31)).toEqual([BYPASS_RULE_START_ID + 2, BYPASS_RULE_START_ID + 3])
+    expect([...holder.fake.tabRuleIds.keys()]).toEqual([31])
+  })
+
+  it('starts with an empty tab→rule map after a browser restart', async () => {
+    await mod.handleBypass(testUrl)
+    expect(holder.fake.tabRuleIds.size).toBe(1)
+
+    // Browser restart: fresh port (session rules, counter, and tab map
+    // cleared) and a fresh module instance.
+    holder.fake = createFakeDnrPort()
+    vi.resetModules()
+    mod = await import('./background')
+    onRemovedListener = onRemovedAddListener.mock.calls[onRemovedAddListener.mock.calls.length - 1]?.[0]
+
+    expect(holder.fake.tabRuleIds.size).toBe(0)
+    onRemovedListener!(99)
+    expect(holder.fake.sessionRules.size).toBe(0)
   })
 })
 
