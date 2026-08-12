@@ -84,8 +84,7 @@ func (m *Module) Register(ctx context.Context, ip, name string) error {
 	id := uuid.New()
 	held, err := m.store.NameHeldByOther(ctx, name, ip)
 	if err != nil {
-		m.logger.Error("register kiosk", "error", err, "name", name, "ip", ip)
-		return fmt.Errorf("register kiosk: %w", err)
+		return m.logRegisterError(err, name, ip)
 	}
 	if held {
 		return ErrNameTaken
@@ -100,11 +99,17 @@ func (m *Module) Register(ctx context.Context, ip, name string) error {
 		if lookupErr == nil && held {
 			return ErrNameTaken
 		}
-		m.logger.Error("register kiosk", "error", err, "name", name, "ip", ip)
-		return fmt.Errorf("register kiosk: %w", err)
+		return m.logRegisterError(err, name, ip)
 	}
 	m.logger.Info("kiosk registered", "kiosk_id", row.ID, "name", row.Name, "ip", row.IP)
 	return nil
+}
+
+// logRegisterError records a register failure with the kiosk context and
+// wraps the underlying error for the caller.
+func (m *Module) logRegisterError(err error, name, ip string) error {
+	m.logger.Error("register kiosk", "error", err, "name", name, "ip", ip)
+	return fmt.Errorf("register kiosk: %w", err)
 }
 
 // GetKioskByIP looks up the kiosk registered under ip. An unregistered IP
