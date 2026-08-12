@@ -6,20 +6,6 @@
 // sender) are injected seams so the module is testable without any chrome
 // APIs.
 
-declare global {
-  // The project's lib target is ES2020, which predates
-  // Promise.withResolvers (ES2024). Chrome has shipped it since 119, so
-  // declare the member this module uses instead of widening the whole
-  // project's lib.
-  interface PromiseConstructor {
-    withResolvers<T>(): {
-      promise: Promise<T>
-      resolve: (value: T | PromiseLike<T>) => void
-      reject: (reason?: unknown) => void
-    }
-  }
-}
-
 /**
  * Hash fragment the interception redirect appends to the original signing
  * URL (`${interceptBaseUrl}#url=<original>`). The intercepted page strips
@@ -35,6 +21,7 @@ export const INTERCEPT_HASH_PREFIX = '#url='
  */
 export const BYPASS_MESSAGE_TYPE = 'bypass'
 
+/** The broker's /api/kiosks entry shape. */
 export type Kiosk = { id: string; name: string }
 
 // MV3 service workers sleep when idle, and the intercepted page may have been
@@ -80,8 +67,10 @@ const defaultSender: Sender = (msg) => chrome.runtime.sendMessage(msg)
 // Broker URLs are joined with '/api/...' paths, so a trailing slash would
 // produce '//api/...'. Go's ServeMux redirects unclean paths, and a 301
 // makes browsers rewrite POST to GET — silently breaking send-to-kiosk.
-// Both calls below strip trailing slashes the same way (and reason) as
-// config.ts.
+// Same reason (and approach) as config.ts.
+function apiUrl(base: string): string {
+  return base.replace(/\/+$/, '')
+}
 
 /**
  * List the kiosks currently registered with the broker.
@@ -93,7 +82,7 @@ export async function listKiosks(
   brokerUrl: string,
   fetcher: typeof fetch = fetch
 ): Promise<Kiosk[]> {
-  const res = await fetcher(`${brokerUrl.replace(/\/+$/, '')}/api/kiosks`)
+  const res = await fetcher(`${apiUrl(brokerUrl)}/api/kiosks`)
   if (!res.ok) throw new Error(`kiosk listing failed with status ${res.status}`)
   const body: unknown = await res.json() // throws on a non-JSON body
   if (!Array.isArray(body)) throw new Error('kiosk listing returned a non-array body')
@@ -113,7 +102,7 @@ export async function pushSession(
   fetcher: typeof fetch = fetch
 ): Promise<void> {
   const res = await fetcher(
-    `${brokerUrl.replace(/\/+$/, '')}/api/kiosks/${kioskId}/sessions`,
+    `${apiUrl(brokerUrl)}/api/kiosks/${kioskId}/sessions`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -144,9 +133,7 @@ export async function requestBypass(url: string, sender: Sender = defaultSender)
       console.warn('[docu-kiosk] sendMessage attempt %d failed: %o', attempt + 1, err)
       if (attempt < BYPASS_MAX_ATTEMPTS - 1) {
         // Back off before the next wake attempt, giving the worker time to boot.
-        const { promise, resolve } = Promise.withResolvers<void>()
-        setTimeout(resolve, BYPASS_RETRY_DELAY_MS * (attempt + 1))
-        await promise
+        await new Promise<void>((resolve) => setTimeout(resolve, BYPASS_RETRY_DELAY_MS * (attempt + 1)))
       }
       continue
     }

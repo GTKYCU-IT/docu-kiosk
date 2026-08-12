@@ -85,7 +85,7 @@
         console.error('[docu-kiosk]', msg)
         toast.error(msg)
       } else {
-        console.error('[docu-kiosk] bypass: all sendMessage attempts failed')
+        console.error('[docu-kiosk] bypass:', err instanceof Error ? err.message : err)
         toast.error('Could not open in browser. The URL has been copied to your clipboard.')
       }
     }
