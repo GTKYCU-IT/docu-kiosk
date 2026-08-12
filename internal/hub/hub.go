@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"sync"
+	"time"
 
 	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/coder/websocket"
@@ -15,46 +18,203 @@ import (
 // ErrNotConnected is returned when sending to a kiosk with no live session.
 var ErrNotConnected = errors.New("kiosk not connected")
 
-type Hub struct {
-	mu       sync.RWMutex
-	sessions map[uuid.UUID]*websocket.Conn
+// ErrWriteFailed is returned when a session exists but the socket write fails.
+var ErrWriteFailed = errors.New("write to kiosk failed")
+
+// ErrKioskNotFound is returned when auth lookup finds no kiosk for the IP.
+var ErrKioskNotFound = errors.New("kiosk not found")
+
+// Kiosk identifies a kiosk authorized to connect.
+type Kiosk struct {
+	ID   uuid.UUID
+	Name string
 }
 
-func New() *Hub {
+// KioskStore is the auth seam. Implemented by the server's DB adapter
+// (production) and by a map-based fake (tests).
+type KioskStore interface {
+	GetKioskByIP(ctx context.Context, ip string) (Kiosk, error)
+}
+
+// conn is the subset of *websocket.Conn the hub drives.
+type conn interface {
+	Write(ctx context.Context, typ websocket.MessageType, data []byte) error
+	Ping(ctx context.Context) error
+	Read(ctx context.Context) (websocket.MessageType, []byte, error)
+	CloseNow() error
+}
+
+type Hub struct {
+	store        KioskStore
+	logger       *slog.Logger
+	mu           sync.RWMutex
+	sessions     map[uuid.UUID]conn
+	pingInterval time.Duration
+	pingTimeout  time.Duration
+}
+
+// New returns a Hub that authenticates kiosks against store and logs through
+// logger. pingInterval and pingTimeout default to 30s and 5s and are mutable
+// by package-hub tests.
+func New(store KioskStore, logger *slog.Logger) *Hub {
 	return &Hub{
-		sessions: make(map[uuid.UUID]*websocket.Conn),
+		store:        store,
+		logger:       logger,
+		sessions:     make(map[uuid.UUID]conn),
+		pingInterval: 30 * time.Second,
+		pingTimeout:  5 * time.Second,
 	}
 }
 
-// Register adds a kiosk connection keyed by its UUID.
-func (h *Hub) Register(id uuid.UUID, conn *websocket.Conn) uuid.UUID {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.sessions[id] = conn
-	return id
+// Serve accepts the WebSocket, authenticates the kiosk IP against the store,
+// and runs the session until disconnect. Blocks for the connection lifetime.
+func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, kioskIP string) {
+	k, err := h.store.GetKioskByIP(r.Context(), kioskIP)
+	if err != nil {
+		if errors.Is(err, ErrKioskNotFound) {
+			h.logger.Warn("ws connect rejected: unregistered ip", "ip", kioskIP)
+			http.Error(w, "unregistered ip", http.StatusUnauthorized)
+			return
+		}
+		h.logger.Error("ws connect auth failed", "error", err, "ip", kioskIP)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// InsecureSkipVerify is safe here: the broker runs on an internal network
+	// and the Vite dev proxy changes the Origin host during development.
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		h.logger.Error("ws accept", "error", err, "kiosk_id", k.ID, "ip", kioskIP)
+		return
+	}
+
+	h.runSession(r.Context(), k, kioskIP, c)
 }
 
-func (h *Hub) Unregister(id uuid.UUID) {
+// runSession drives one kiosk connection through register, greeting, ping, and
+// read, cleaning up the session on exit.
+func (h *Hub) runSession(ctx context.Context, k Kiosk, ip string, c conn) {
+	defer c.CloseNow()
+
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.sessions, id)
+	h.sessions[k.ID] = c
+	h.mu.Unlock()
+	h.logger.Info("kiosk connected", "kiosk_id", k.ID, "name", k.Name, "ip", ip)
+	defer func() {
+		h.mu.Lock()
+		if h.sessions[k.ID] == c {
+			delete(h.sessions, k.ID)
+		}
+		h.mu.Unlock()
+		h.logger.Info("kiosk disconnected", "kiosk_id", k.ID, "name", k.Name)
+	}()
+
+	data, err := protocol.Marshal(protocol.NewGreeting(k.Name))
+	if err != nil {
+		h.logger.Error("marshal greeting", "error", err, "kiosk_id", k.ID)
+		return
+	}
+	if err := c.Write(ctx, websocket.MessageText, data); err != nil {
+		h.logger.Error("write greeting", "error", err, "kiosk_id", k.ID)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go h.pingLoop(ctx, cancel, c)
+
+	for {
+		if _, _, err := c.Read(ctx); err != nil {
+			return
+		}
+	}
 }
 
+// pingLoop keeps the connection alive with periodic pings. A failed ping
+// cancels the session context, which unblocks the read loop and tears the
+// session down.
+func (h *Hub) pingLoop(ctx context.Context, cancel context.CancelFunc, c conn) {
+	ticker := time.NewTicker(h.pingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			pingCtx, pingCancel := context.WithTimeout(ctx, h.pingTimeout)
+			err := c.Ping(pingCtx)
+			pingCancel()
+			if err != nil {
+				cancel()
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// Send writes a protocol message to the kiosk session. Unregistered ->
+// ErrNotConnected (Warn-logged). Registered but write fails -> ErrWriteFailed
+// wrapping the write error (Error-logged with kiosk_id). Send reports success
+// only when the session that received the write is still the live session on
+// completion; a kiosk that reconnects or disconnects mid-write yields
+// ErrWriteFailed (Warn-logged), even when the stale conn accepted the write.
+// Logging of failures lives INSIDE Send.
 func (h *Hub) Send(ctx context.Context, id uuid.UUID, msg protocol.Message) error {
 	data, err := protocol.Marshal(msg)
 	if err != nil {
+		h.logger.Error("push failed: marshal", "error", err, "kiosk_id", id)
 		return err
 	}
 
 	h.mu.RLock()
-	conn, ok := h.sessions[id]
+	c, ok := h.sessions[id]
 	h.mu.RUnlock()
 
 	if !ok {
+		h.logger.Warn("push failed: kiosk not connected", "kiosk_id", id)
 		return fmt.Errorf("%w: %s", ErrNotConnected, id)
 	}
 
-	return conn.Write(ctx, websocket.MessageText, data)
+	if err := c.Write(ctx, websocket.MessageText, data); err != nil {
+		// The write went to c; confirm c is still the live session for id.
+		if _, replaced := h.sessionState(id, c); replaced {
+			// A replacement conn took over while the write was in flight, so
+			// the message did not reach the live session.
+			h.logger.Warn("push lost: kiosk reconnected mid-write", "kiosk_id", id, "error", err)
+			return fmt.Errorf("%w: %w", ErrWriteFailed, err)
+		}
+		h.logger.Error("push failed: write to kiosk", "error", err, "kiosk_id", id)
+		return fmt.Errorf("%w: %w", ErrWriteFailed, err)
+	}
+
+	// The write went to c; confirm c is still the live session on completion.
+	if still, replaced := h.sessionState(id, c); replaced {
+		// The stale conn accepted the write, but a replacement conn now owns
+		// the session, so the message never reached the live kiosk.
+		h.logger.Warn("push lost: kiosk reconnected mid-write", "kiosk_id", id)
+		return fmt.Errorf("%w: kiosk reconnected mid-write", ErrWriteFailed)
+	} else if !still {
+		// The session was torn down while the write was in flight, so the
+		// message cannot be delivered.
+		h.logger.Warn("push lost: kiosk disconnected mid-write", "kiosk_id", id)
+		return fmt.Errorf("%w: kiosk disconnected mid-write", ErrWriteFailed)
+	}
+	return nil
+}
+
+// sessionState reports whether id still maps to a live session and, if so,
+// whether that session is a different conn than c (i.e. a replacement took
+// over). Send calls it only after a Write completes; no lock is held across
+// the Write itself.
+func (h *Hub) sessionState(id uuid.UUID, c conn) (still, replaced bool) {
+	h.mu.RLock()
+	cur, ok := h.sessions[id]
+	h.mu.RUnlock()
+	return ok, ok && cur != c
 }
 
 // Connected returns the UUIDs of all connected kiosks.

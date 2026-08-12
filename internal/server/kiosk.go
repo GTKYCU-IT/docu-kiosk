@@ -1,10 +1,14 @@
 package server
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/calvertjadon/docu-kiosk/internal/database"
+	"github.com/calvertjadon/docu-kiosk/internal/hub"
 	"github.com/google/uuid"
 )
 
@@ -60,4 +64,18 @@ func (s *server) handleListKiosks(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(kiosks)
+}
+
+// kioskStore adapts the database to the hub auth seam.
+type kioskStore struct{ db *database.Queries }
+
+func (ks kioskStore) GetKioskByIP(ctx context.Context, ip string) (hub.Kiosk, error) {
+	k, err := ks.db.GetKioskByIP(ctx, ip)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return hub.Kiosk{}, hub.ErrKioskNotFound
+		}
+		return hub.Kiosk{}, err
+	}
+	return hub.Kiosk{ID: k.ID, Name: k.Name}, nil
 }
