@@ -82,7 +82,7 @@ beforeEach(async () => {
   // Fresh fake port per test, then the same startup sequence the service
   // worker entry runs: wire the listeners and install the intercept rules.
   holder.fake = createFakeDnrPort()
-  registerBackgroundListeners(stubChrome)
+  registerBackgroundListeners()
   await installRules()
 
   // Listeners are registered exactly once per wiring call — capture them now.
@@ -338,7 +338,7 @@ describe('service-worker and browser restarts', () => {
 
     // Service-worker restart: the wiring function is re-run (as the fresh
     // worker's entry would); capture the newly registered onRemoved listener.
-    registerBackgroundListeners(stubChrome)
+    registerBackgroundListeners()
     onRemovedListener = onRemovedAddListener.mock.calls[onRemovedAddListener.mock.calls.length - 1]?.[0]
 
     onRemovedListener!(30)
@@ -355,7 +355,7 @@ describe('service-worker and browser restarts', () => {
     await handleBypass('https://demo.docusign.net/Signing/a')
     await handleBypass('https://demo.docusign.net/Signing/b')
 
-    registerBackgroundListeners(stubChrome)
+    registerBackgroundListeners()
     onRemovedListener = onRemovedAddListener.mock.calls[onRemovedAddListener.mock.calls.length - 1]?.[0]
 
     onRemovedListener!(30)
@@ -373,7 +373,7 @@ describe('service-worker and browser restarts', () => {
     // Browser restart: fresh port (session rules, counter, and tab map
     // cleared) and re-wired listeners, as the fresh worker's entry would.
     holder.fake = createFakeDnrPort()
-    registerBackgroundListeners(stubChrome)
+    registerBackgroundListeners()
     onRemovedListener = onRemovedAddListener.mock.calls[onRemovedAddListener.mock.calls.length - 1]?.[0]
 
     expect(holder.fake.tabRuleIds.size).toBe(0)
@@ -419,5 +419,33 @@ describe('bypass failure cleanup', () => {
     // Nothing was torn down on failure — rules and mapping stay consistent.
     expect(holder.fake.sessionRules.size).toBe(2)
     expect(holder.fake.tabRuleIds.size).toBe(1)
+  })
+})
+
+describe('module import side-effect freedom', () => {
+  it('importing ./background registers no listeners and installs no rules', async () => {
+    // The static import above already evaluated the module once under the
+    // full chrome stub, so module-load-time chrome access is no longer
+    // observable that way. Re-evaluate it here under a bare stub — any
+    // surface the module touched at import time (listener registration, DNR
+    // install) would throw, failing the import loudly. This is the same
+    // guard the pre-patch dynamic import provided for the "importing
+    // background.ts has no side effects" criterion.
+    try {
+      vi.stubGlobal('chrome', {} as typeof chrome)
+      vi.resetModules()
+
+      // An import-time DNR install would land on the same fake port holder
+      // (the mock factory forwards to holder.fake at call time).
+      const installSpy = vi.spyOn(holder.fake, 'installInterceptRules')
+      const mod = await import('./background')
+
+      expect(installSpy).not.toHaveBeenCalled()
+      expect(mod.registerBackgroundListeners).toBeTypeOf('function')
+      expect(mod.installRules).toBeTypeOf('function')
+    } finally {
+      // Restore the suite's chrome stub for the remaining tests.
+      vi.stubGlobal('chrome', stubChrome)
+    }
   })
 })

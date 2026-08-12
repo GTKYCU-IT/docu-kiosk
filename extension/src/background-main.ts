@@ -4,4 +4,4 @@ import { installRules, registerBackgroundListeners } from './background'
 // background module itself is side-effect free — this file is where the
 // worker boots: install the interception rules and wire the listeners.
 void installRules()
-registerBackgroundListeners(chrome)
+registerBackgroundListeners()
