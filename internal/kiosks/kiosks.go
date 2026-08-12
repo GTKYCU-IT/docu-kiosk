@@ -8,12 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/google/uuid"
-	sqlite "modernc.org/sqlite"
-	sqlite3 "modernc.org/sqlite/lib"
 )
+
+// ErrNameRequired is returned by Register when name is empty or
+// whitespace-only.
+var ErrNameRequired = errors.New("kiosk name is required")
 
 // ErrNameTaken is returned by Register when the name is held by a different kiosk.
 var ErrNameTaken = errors.New("kiosk name already in use")
@@ -28,13 +31,25 @@ type Kiosk struct {
 	Name string
 }
 
-// store is the persistence seam for the kiosk directory. *database.Queries
-// implements it in production; tests inject fakes.
+// store is the persistence seam for the kiosk directory. dbStore adapts
+// *database.Queries to it in production; tests inject fakes.
 type store interface {
 	UpsertKiosk(ctx context.Context, arg database.UpsertKioskParams) (database.Kiosk, error)
 	GetKioskByIP(ctx context.Context, ip string) (database.Kiosk, error)
-	GetKioskByName(ctx context.Context, name string) (database.Kiosk, error)
+	NameHeldByOther(ctx context.Context, ip, name string) (bool, error)
 	ListKiosksByIDs(ctx context.Context, ids []uuid.UUID) ([]database.Kiosk, error)
+}
+
+// dbStore adapts *database.Queries to the domain-shaped store seam. sqlc
+// generates a params struct for the two-argument NameHeldByOther query, so
+// the adapter bridges it into the seam's flat signature; the remaining seam
+// methods are promoted from the embedded *database.Queries.
+type dbStore struct {
+	*database.Queries
+}
+
+func (d dbStore) NameHeldByOther(ctx context.Context, ip, name string) (bool, error) {
+	return d.Queries.NameHeldByOther(ctx, database.NameHeldByOtherParams{IP: ip, Name: name})
 }
 
 // Module is the kiosk directory. It owns registration and identity
@@ -47,7 +62,7 @@ type Module struct {
 // New returns a Module that persists kiosks through db and logs through
 // logger.
 func New(db *database.Queries, logger *slog.Logger) *Module {
-	return newModule(db, logger)
+	return newModule(dbStore{Queries: db}, logger)
 }
 
 // newModule builds a Module around any store; tests use it with a fake.
@@ -57,26 +72,44 @@ func newModule(s store, logger *slog.Logger) *Module {
 
 // Register upserts a kiosk under ip with a fresh identity, renaming the
 // kiosk when ip is already registered under a different name. It returns
-// ErrNameTaken when name is held by a different kiosk; same-IP renames hit
-// the upsert's ON CONFLICT clause and never error. On success the stored
-// identity returned by the upsert is logged under "kiosk registered".
+// ErrNameRequired when name is empty or whitespace-only, and ErrNameTaken
+// when name is held by a different kiosk; same-IP renames hit the upsert's
+// ON CONFLICT clause and never error. On success the stored identity
+// returned by the upsert is logged under "kiosk registered".
 func (m *Module) Register(ctx context.Context, ip, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return ErrNameRequired
+	}
+
 	id := uuid.New()
+	held, err := m.store.NameHeldByOther(ctx, ip, name)
+	if err != nil {
+		return m.logRegisterError(err, ip, name)
+	}
+	if held {
+		return ErrNameTaken
+	}
+
 	row, err := m.store.UpsertKiosk(ctx, database.UpsertKioskParams{ID: id, IP: ip, Name: name})
 	if err != nil {
-		var sqliteErr *sqlite.Error
-		if errors.As(err, &sqliteErr) &&
-			(sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT || sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE) {
-			existing, lookupErr := m.store.GetKioskByName(ctx, name)
-			if lookupErr == nil && existing.IP != ip {
-				return ErrNameTaken
-			}
+		// A racing register may have claimed the name between the pre-check
+		// and the write; classify the failure through the store's domain
+		// answer instead of driver error codes.
+		held, lookupErr := m.store.NameHeldByOther(ctx, ip, name)
+		if lookupErr == nil && held {
+			return ErrNameTaken
 		}
-		m.logger.Error("register kiosk", "error", err, "name", name, "ip", ip)
-		return fmt.Errorf("register kiosk: %w", err)
+		return m.logRegisterError(err, ip, name)
 	}
 	m.logger.Info("kiosk registered", "kiosk_id", row.ID, "name", row.Name, "ip", row.IP)
 	return nil
+}
+
+// logRegisterError records a register failure with the kiosk context and
+// wraps the underlying error for the caller.
+func (m *Module) logRegisterError(err error, ip, name string) error {
+	m.logger.Error("register kiosk", "error", err, "name", name, "ip", ip)
+	return fmt.Errorf("register kiosk: %w", err)
 }
 
 // GetKioskByIP looks up the kiosk registered under ip. An unregistered IP

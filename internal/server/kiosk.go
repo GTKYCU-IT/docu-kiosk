@@ -21,18 +21,16 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if params.Name == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
-		return
-	}
-
 	err := s.kiosks.Register(r.Context(), s.realIP(r), params.Name)
 	if err != nil {
-		if errors.Is(err, kiosks.ErrNameTaken) {
+		switch {
+		case errors.Is(err, kiosks.ErrNameRequired):
+			http.Error(w, "name is required", http.StatusBadRequest)
+		case errors.Is(err, kiosks.ErrNameTaken):
 			s.respondWithError(w, "kiosk name already in use", http.StatusConflict, nil)
-			return
+		default:
+			s.respondWithError(w, "failed to register kiosk", http.StatusInternalServerError, err)
 		}
-		s.respondWithError(w, "failed to register kiosk", http.StatusInternalServerError, err)
 		return
 	}
 
