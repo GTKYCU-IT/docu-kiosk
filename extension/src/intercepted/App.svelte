@@ -1,12 +1,18 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte'
   import { getConfig } from '../config'
+  import {
+    INTERCEPT_HASH_PREFIX,
+    listKiosks,
+    pushSession,
+    requestBypass,
+    BypassResponseError,
+    type Kiosk,
+  } from '../lib/broker-client'
   import { Button } from '$lib/components/ui/button'
   import { ExternalLink, Send } from '@lucide/svelte'
   import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '$lib/components/ui/card'
   import { toast } from 'svelte-sonner'
-
-  type Kiosk = { id: string; name: string }
 
   let status = $state('')
   let kiosks = $state<Kiosk[]>([])
@@ -18,12 +24,12 @@
 
   onMount(async () => {
     const hash = window.location.hash
-    if (!hash.startsWith('#url=')) {
+    if (!hash.startsWith(INTERCEPT_HASH_PREFIX)) {
       status = 'No signing link intercepted.'
       return
     }
 
-    pendingUrl = hash.slice('#url='.length)
+    pendingUrl = hash.slice(INTERCEPT_HASH_PREFIX.length)
 
     const cfg = await getConfig()
     brokerUrl = cfg.brokerUrl ?? ''
@@ -42,8 +48,7 @@
   async function refreshKiosks() {
     if (sending) return
     try {
-      const res = await fetch(`${brokerUrl}/api/kiosks`)
-      const fetched: Kiosk[] = await res.json()
+      const fetched = await listKiosks(brokerUrl)
       const prevIds = new Set(kiosks.map(k => k.id))
       const unchanged = fetched.length === prevIds.size && fetched.every(k => prevIds.has(k.id))
       if (unchanged) return
@@ -59,12 +64,7 @@
     clearInterval(pollInterval)
     status = `Sending to ${kiosk.name}…`
     try {
-      const res = await fetch(`${brokerUrl}/api/kiosks/${kiosk.id}/sessions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: pendingUrl }),
-      })
-      if (!res.ok) throw new Error(`${res.status}`)
+      await pushSession(brokerUrl, kiosk.id, pendingUrl)
       window.close()
     } catch {
       status = `Failed to send to ${kiosk.name}.`
@@ -74,32 +74,21 @@
   }
 
   async function bypass() {
-    // MV3 service workers can be idle when the intercepted page has been open
-    // for a while.  chrome.runtime.sendMessage must wake the worker, and the
-    // first attempt can race with startup — retry a few times with backoff.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const response = await chrome.runtime.sendMessage({ type: 'bypass', url: pendingUrl })
-        if (response?.error) {
-          const msg = `Bypass failed: ${response.error}`
-          console.error('[docu-kiosk]', msg)
-          await copyPendingUrl()
-          toast.error(msg)
-          return
-        }
-        return // success — the tab will open
-      } catch (err) {
-        // sendMessage itself failed — SW may not be running yet
-        console.warn('[docu-kiosk] sendMessage attempt %d failed: %o', attempt + 1, err)
-        if (attempt < 2) {
-          await new Promise(r => setTimeout(r, 300 * (attempt + 1)))
-        }
+    // requestBypass owns the wake-retry protocol; map its outcomes to the
+    // existing user-facing strings.
+    try {
+      await requestBypass(pendingUrl)
+    } catch (err) {
+      await copyPendingUrl()
+      if (err instanceof BypassResponseError) {
+        const msg = `Bypass failed: ${err.message}`
+        console.error('[docu-kiosk]', msg)
+        toast.error(msg)
+      } else {
+        console.error('[docu-kiosk] bypass: all sendMessage attempts failed')
+        toast.error('Could not open in browser. The URL has been copied to your clipboard.')
       }
     }
-    // All retries exhausted
-    console.error('[docu-kiosk] bypass: all sendMessage attempts failed')
-    await copyPendingUrl()
-    toast.error('Could not open in browser. The URL has been copied to your clipboard.')
   }
 
   async function copyPendingUrl() {
