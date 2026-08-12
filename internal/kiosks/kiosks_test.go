@@ -15,7 +15,7 @@ import (
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/google/uuid"
 	"github.com/pressly/goose/v3"
-	_ "modernc.org/sqlite"
+	sqlite "modernc.org/sqlite"
 )
 
 // newTestDB returns a goose-migrated in-memory SQLite database, closed
@@ -92,6 +92,33 @@ func (s *stubStore) ListKiosksByIDs(_ context.Context, _ []uuid.UUID) ([]databas
 		return nil, s.listErr
 	}
 	return nil, nil
+}
+
+// uniqueConstraintError returns a real driver-level UNIQUE constraint error
+// (modernc *sqlite.Error, extended code 2067) produced by violating a scratch
+// table, so fake-store tests exercise the real classification gate.
+func uniqueConstraintError(t *testing.T) error {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE t (v text UNIQUE)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO t VALUES ('x')"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("INSERT INTO t VALUES ('x')")
+	if err == nil {
+		t.Fatal("second insert succeeded, want UNIQUE constraint error")
+	}
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		t.Fatalf("error %T is not *sqlite.Error: %v", err, err)
+	}
+	return err
 }
 
 // --- Registration ---
@@ -191,6 +218,23 @@ func TestRegisterNameTakenByOtherKiosk(t *testing.T) {
 	if _, err := m.ResolveIdentity(ctx, "10.0.0.2"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("ResolveIdentity(10.0.0.2) = %v, want ErrNotFound (second kiosk must not be registered)", err)
 	}
+
+	// DO UPDATE-phase conflict: a registered IP re-registering under a name
+	// held by another kiosk hits the upsert's ON CONFLICT(ip) DO UPDATE path
+	// and must still yield ErrNameTaken, not a silent rename.
+	if err := m.Register(ctx, "10.0.0.2", "Branch2"); err != nil {
+		t.Fatalf("Register Branch2: %v", err)
+	}
+	if err := m.Register(ctx, "10.0.0.2", "Lobby"); !errors.Is(err, ErrNameTaken) {
+		t.Fatalf("Register(10.0.0.2, Lobby) = %v, want ErrNameTaken", err)
+	}
+	kept, err := m.ResolveIdentity(ctx, "10.0.0.2")
+	if err != nil {
+		t.Fatalf("ResolveIdentity(10.0.0.2) after conflict: %v", err)
+	}
+	if kept.Name != "Branch2" {
+		t.Errorf("10.0.0.2 name changed to %q, want Branch2", kept.Name)
+	}
 }
 
 // --- Identity ---
@@ -278,25 +322,49 @@ func TestListLiveEmptySkipsQuery(t *testing.T) {
 }
 
 func TestRegisterDBFailureLogged(t *testing.T) {
-	s := &stubStore{upsertErr: errors.New("db down"), nameErr: sql.ErrNoRows}
+	// A genuine constraint error followed by a failing name lookup falls
+	// through to the logged wrapped-error path (not ErrNameTaken).
+	s := &stubStore{upsertErr: uniqueConstraintError(t), nameErr: sql.ErrNoRows}
 	m, buf := newTestModule(s)
 
 	err := m.Register(context.Background(), "10.0.0.1", "Lobby")
 	if err == nil {
 		t.Fatal("Register returned nil error, want wrapped error")
 	}
+	if errors.Is(err, ErrNameTaken) {
+		t.Fatalf("Register = %v, want wrapped non-conflict error", err)
+	}
 	if !strings.Contains(buf.String(), "register kiosk") {
 		t.Errorf("log buffer does not contain %q: %s", "register kiosk", buf.String())
 	}
+	if !strings.Contains(buf.String(), "level=ERROR") {
+		t.Errorf("upsert failure was not logged at ERROR level: %s", buf.String())
+	}
 }
 
-func TestRegisterUpsertFailureIsNotNameConflict(t *testing.T) {
+func TestRegisterNameTakenWithConstraintError(t *testing.T) {
+	// A genuine UNIQUE constraint error whose name lookup finds a
+	// different-IP holder is ErrNameTaken — the seam-level twin of
+	// TestRegisterNameTakenByOtherKiosk.
 	s := &stubStore{
-		upsertErr: errors.New("disk I/O error"),
+		upsertErr: uniqueConstraintError(t),
 		byName: map[string]database.Kiosk{
 			"Lobby": {ID: uuid.New(), IP: "10.0.0.1", Name: "Lobby"},
 		},
 	}
+	m, buf := newTestModule(s)
+
+	if err := m.Register(context.Background(), "10.0.0.2", "Lobby"); !errors.Is(err, ErrNameTaken) {
+		t.Fatalf("Register = %v, want ErrNameTaken", err)
+	}
+	if strings.Contains(buf.String(), "level=ERROR") {
+		t.Errorf("name conflict was logged as an error: %s", buf.String())
+	}
+}
+
+func TestRegisterUpsertFailureIsNotNameConflict(t *testing.T) {
+	// A non-constraint failure must never be reported as a name conflict.
+	s := &stubStore{upsertErr: errors.New("disk I/O error")}
 	m, buf := newTestModule(s)
 
 	err := m.Register(context.Background(), "10.0.0.2", "Lobby")
