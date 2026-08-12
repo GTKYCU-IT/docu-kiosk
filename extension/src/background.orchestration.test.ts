@@ -2,22 +2,39 @@ import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
 import { BYPASS_RULE_START_ID } from './dnr-port'
 import { createFakeDnrPort } from './dnr-port.fake'
 import type { FakeDnrPort } from './dnr-port.fake'
+import type { DnrPort } from './dnr-port'
 import type * as DnrPortModule from './dnr-port'
-import type * as BackgroundModule from './background'
+import {
+  SIGNING_URL_FILTERS,
+  handleBypass,
+  installRules,
+  registerBackgroundListeners,
+} from './background'
 
-// The background module wires up its DNR port and Chrome listeners at import
-// time. The port factory is mocked to return the fake (via the hoisted holder,
-// since the mock factory cannot close over test-file bindings), and chrome is
-// stubbed WITHOUT declarativeNetRequest and WITHOUT storage.session — the
-// extension must not touch those APIs directly anymore. Vitest isolates
-// modules per test file, so this does not affect background.test.ts.
+// The background module is imported once, statically: it has no import-time
+// side effects, so there is no module re-import to simulate. The DNR port
+// factory is mocked to return an adapter that forwards to `holder.fake` at
+// call time (via the hoisted holder, since the mock factory cannot close over
+// test-file bindings) — tests swap in a fresh fake port per test or to
+// simulate a browser restart without touching the module. chrome is stubbed
+// WITHOUT declarativeNetRequest and WITHOUT storage.session — the extension
+// must not touch those APIs directly anymore. Vitest isolates modules per
+// test file, so this does not affect background.test.ts.
 const holder = vi.hoisted(() => ({ fake: null as unknown as FakeDnrPort }))
 
 vi.mock('./dnr-port', async (importOriginal) => ({
   // dnr-port.fake.ts imports BYPASS_RULE_START_ID as a runtime value, so the
   // mock must keep the real module's exports — the spread does that.
   ...(await importOriginal<typeof DnrPortModule>()),
-  createChromeDnrPort: () => holder.fake,
+  createChromeDnrPort: (): DnrPort => ({
+    installInterceptRules: (addRules, removeRuleIds) =>
+      holder.fake.installInterceptRules(addRules, removeRuleIds),
+    addBypassRules: (addRules, removeRuleIds) =>
+      holder.fake.addBypassRules(addRules, removeRuleIds),
+    allocateBypassRuleIds: (count) => holder.fake.allocateBypassRuleIds(count),
+    rememberBypassTab: (tabId, ruleIds) => holder.fake.rememberBypassTab(tabId, ruleIds),
+    forgetBypassTab: (tabId) => holder.fake.forgetBypassTab(tabId),
+  }),
 }))
 
 const getURL = vi.fn()
@@ -29,7 +46,7 @@ const tabsRemove = vi.fn()
 const onRemovedAddListener = vi.fn()
 const webNavOnBeforeNavigate = vi.fn()
 
-vi.stubGlobal('chrome', {
+const stubChrome = {
   runtime: {
     getURL,
     onMessage: { addListener: onMessageAddListener },
@@ -42,13 +59,10 @@ vi.stubGlobal('chrome', {
     onRemoved: { addListener: onRemovedAddListener },
   },
   webNavigation: { onBeforeNavigate: { addListener: webNavOnBeforeNavigate } },
-})
+} as unknown as typeof chrome
 
-// `mod` is loaded with `await import()` (not a static import) deliberately:
-// the service-worker-restart tests re-execute the module top-level via
-// vi.resetModules(), which only a dynamic import can do — static imports
-// cannot be reloaded. The type comes from the top-level type-only import.
-let mod: typeof BackgroundModule
+vi.stubGlobal('chrome', stubChrome)
+
 let onClickedListener: (() => void) | undefined
 let navListener: ((details: { frameId: number; url: string }) => void) | undefined
 let navFilter: { url: { hostSuffix: string }[] } | undefined
@@ -65,13 +79,13 @@ beforeEach(async () => {
   tabsCreate.mockResolvedValue({ id: 99 })
   tabsUpdate.mockResolvedValue(undefined)
 
-  // Fresh fake port and fresh module instance per test, so the startup
-  // install and listener wiring run against the fake and the chrome stub.
+  // Fresh fake port per test, then the same startup sequence the service
+  // worker entry runs: wire the listeners and install the intercept rules.
   holder.fake = createFakeDnrPort()
-  vi.resetModules()
-  mod = await import('./background')
+  registerBackgroundListeners()
+  await installRules()
 
-  // Listeners are registered exactly once per import — capture them now.
+  // Listeners are registered exactly once per wiring call — capture them now.
   onClickedListener = actionOnClicked.mock.calls[0]?.[0]
   navListener = webNavOnBeforeNavigate.mock.calls[0]?.[0]
   navFilter = webNavOnBeforeNavigate.mock.calls[0]?.[1]
@@ -106,7 +120,7 @@ describe('startup rule installation', () => {
     expect(holder.fake.dynamicRules.size).toBe(4)
     const rules = [...holder.fake.dynamicRules.values()]
     expect(rules.map((r) => r.id)).toEqual([1, 2, 3, 4])
-    expect(rules.map((r) => r.condition.regexFilter)).toEqual(mod.SIGNING_URL_FILTERS)
+    expect(rules.map((r) => r.condition.regexFilter)).toEqual(SIGNING_URL_FILTERS)
   })
 
   it('replaces stale intercept rules from a prior worker run at startup', async () => {
@@ -116,13 +130,12 @@ describe('startup rule installation', () => {
     const stalePort = createFakeDnrPort()
     for (let id = 1; id <= 4; id++) stalePort.dynamicRules.set(id, makeStaleRule(id))
     holder.fake = stalePort
-    vi.resetModules()
-    mod = await import('./background')
+    await installRules()
 
     expect(holder.fake.dynamicRules.size).toBe(4)
     const rules = [...holder.fake.dynamicRules.values()]
     expect(rules.map((r) => r.id)).toEqual([1, 2, 3, 4])
-    expect(rules.map((r) => r.condition.regexFilter)).toEqual(mod.SIGNING_URL_FILTERS)
+    expect(rules.map((r) => r.condition.regexFilter)).toEqual(SIGNING_URL_FILTERS)
     expect(rules.some((r) => r.condition.regexFilter === '^stale$')).toBe(false)
   })
 
@@ -131,7 +144,7 @@ describe('startup rule installation', () => {
       new Error('Rule with id 1 was skipped')
     )
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
-    await mod.installRules()
+    await installRules()
     expect(consoleError).toHaveBeenCalledWith(
       '[docu-kiosk] failed to install interception rules:',
       expect.any(Error)
@@ -173,7 +186,7 @@ describe('debug logger', () => {
 
 describe('bypass', () => {
   it('creates a blank tab, installs session allow rules, and navigates to the URL', async () => {
-    await mod.handleBypass(testUrl)
+    await handleBypass(testUrl)
 
     expect(tabsCreate).toHaveBeenCalledWith({ url: 'about:blank', active: false })
     expect(holder.fake.sessionRules.size).toBe(2)
@@ -218,7 +231,7 @@ describe('bypass', () => {
 
 describe('bypass tab cleanup', () => {
   it("removes the tab's session rules when the bypass tab closes", async () => {
-    await mod.handleBypass(testUrl)
+    await handleBypass(testUrl)
     onRemovedListener!(99)
     // Cleanup is async (persisted mapping lookup) and fire-and-forget from
     // the listener — wait for it to settle.
@@ -240,8 +253,8 @@ describe('multi-tab bypass', () => {
       .mockResolvedValueOnce({ id: 10 })
       .mockResolvedValueOnce({ id: 20 })
 
-    await mod.handleBypass('https://demo.docusign.net/Signing/a')
-    await mod.handleBypass('https://demo.docusign.net/Signing/b')
+    await handleBypass('https://demo.docusign.net/Signing/a')
+    await handleBypass('https://demo.docusign.net/Signing/b')
 
     expect(holder.fake.sessionRules.size).toBe(4)
     expect([...holder.fake.sessionRules.keys()]).toEqual([
@@ -264,15 +277,14 @@ describe('multi-tab bypass', () => {
 describe('service-worker and browser restarts', () => {
   it('continues rule IDs across service-worker restarts on the same port', async () => {
     tabsCreate.mockResolvedValue({ id: 30 })
-    await mod.handleBypass('https://demo.docusign.net/Signing/a')
+    await handleBypass('https://demo.docusign.net/Signing/a')
     expect([...holder.fake.sessionRules.keys()]).toEqual([BYPASS_RULE_START_ID, BYPASS_RULE_START_ID + 1])
 
-    // Service-worker restart: fresh module instance, but the SAME fake port —
-    // its session rules and ID counter outlive the worker.
-    vi.resetModules()
-    mod = await import('./background')
+    // Service-worker restart: the module is imported once, so a "fresh
+    // worker" is the same module functions against the SAME fake port — its
+    // session rules and ID counter outlive the worker.
     tabsCreate.mockResolvedValue({ id: 31 })
-    await mod.handleBypass('https://demo.docusign.net/Signing/b')
+    await handleBypass('https://demo.docusign.net/Signing/b')
 
     expect(holder.fake.sessionRules.size).toBe(4)
     expect([...holder.fake.sessionRules.keys()]).toEqual([
@@ -284,22 +296,21 @@ describe('service-worker and browser restarts', () => {
   })
 
   it('restarts rule IDs at BYPASS_RULE_START_ID after a browser restart', async () => {
-    await mod.handleBypass(testUrl)
+    await handleBypass(testUrl)
     expect([...holder.fake.sessionRules.keys()]).toEqual([BYPASS_RULE_START_ID, BYPASS_RULE_START_ID + 1])
 
-    // Browser restart: fresh port (session rules and counter cleared) and a
-    // fresh module instance.
+    // Browser restart: fresh port (session rules and counter cleared). The
+    // module keeps its single import; the port adapter forwards to the new
+    // fake from here on.
     holder.fake = createFakeDnrPort()
-    vi.resetModules()
-    mod = await import('./background')
     tabsCreate.mockResolvedValue({ id: 40 })
-    await mod.handleBypass('https://demo.docusign.net/Signing/b')
+    await handleBypass('https://demo.docusign.net/Signing/b')
 
     expect([...holder.fake.sessionRules.keys()]).toEqual([BYPASS_RULE_START_ID, BYPASS_RULE_START_ID + 1])
   })
 
   it('sweeps stale colliding rules instead of duplicating them', async () => {
-    await mod.handleBypass(testUrl)
+    await handleBypass(testUrl)
     expect(holder.fake.sessionRules.size).toBe(2)
 
     // Counter drifts back to BYPASS_RULE_START_ID (e.g. the session counter
@@ -307,7 +318,7 @@ describe('service-worker and browser restarts', () => {
     // installed.
     holder.fake.nextBypassId = BYPASS_RULE_START_ID
     tabsCreate.mockResolvedValue({ id: 60 })
-    await mod.handleBypass('https://demo.docusign.net/Signing/c')
+    await handleBypass('https://demo.docusign.net/Signing/c')
 
     // Sweep-then-add replaced the stale rules — no "Rule with id N does not
     // have a unique ID" rejection, and no duplicates.
@@ -318,18 +329,16 @@ describe('service-worker and browser restarts', () => {
 
   it("removes a closed tab's rules after a service-worker restart", async () => {
     tabsCreate.mockResolvedValue({ id: 30 })
-    await mod.handleBypass('https://demo.docusign.net/Signing/a')
+    await handleBypass('https://demo.docusign.net/Signing/a')
     expect(holder.fake.sessionRules.size).toBe(2)
     expect(holder.fake.tabRuleIds.get(30)).toEqual([
       BYPASS_RULE_START_ID,
       BYPASS_RULE_START_ID + 1,
     ])
 
-    // Service-worker restart: fresh module instance, but the SAME fake port —
-    // its session rules and persisted tab→rule map outlive the worker. The
-    // fresh module registered its own listeners; capture the new onRemoved.
-    vi.resetModules()
-    mod = await import('./background')
+    // Service-worker restart: the wiring function is re-run (as the fresh
+    // worker's entry would); capture the newly registered onRemoved listener.
+    registerBackgroundListeners()
     onRemovedListener = onRemovedAddListener.mock.calls[onRemovedAddListener.mock.calls.length - 1]?.[0]
 
     onRemovedListener!(30)
@@ -343,11 +352,10 @@ describe('service-worker and browser restarts', () => {
     tabsCreate
       .mockResolvedValueOnce({ id: 30 })
       .mockResolvedValueOnce({ id: 31 })
-    await mod.handleBypass('https://demo.docusign.net/Signing/a')
-    await mod.handleBypass('https://demo.docusign.net/Signing/b')
+    await handleBypass('https://demo.docusign.net/Signing/a')
+    await handleBypass('https://demo.docusign.net/Signing/b')
 
-    vi.resetModules()
-    mod = await import('./background')
+    registerBackgroundListeners()
     onRemovedListener = onRemovedAddListener.mock.calls[onRemovedAddListener.mock.calls.length - 1]?.[0]
 
     onRemovedListener!(30)
@@ -359,14 +367,13 @@ describe('service-worker and browser restarts', () => {
   })
 
   it('starts with an empty tab→rule map after a browser restart', async () => {
-    await mod.handleBypass(testUrl)
+    await handleBypass(testUrl)
     expect(holder.fake.tabRuleIds.size).toBe(1)
 
     // Browser restart: fresh port (session rules, counter, and tab map
-    // cleared) and a fresh module instance.
+    // cleared) and re-wired listeners, as the fresh worker's entry would.
     holder.fake = createFakeDnrPort()
-    vi.resetModules()
-    mod = await import('./background')
+    registerBackgroundListeners()
     onRemovedListener = onRemovedAddListener.mock.calls[onRemovedAddListener.mock.calls.length - 1]?.[0]
 
     expect(holder.fake.tabRuleIds.size).toBe(0)
@@ -379,7 +386,7 @@ describe('bypass failure cleanup', () => {
   it('removes the orphan blank tab when the bypass install fails', async () => {
     vi.spyOn(holder.fake, 'addBypassRules').mockRejectedValueOnce(new Error('boom'))
 
-    await expect(mod.handleBypass(testUrl)).rejects.toThrow('boom')
+    await expect(handleBypass(testUrl)).rejects.toThrow('boom')
     expect(tabsRemove).toHaveBeenCalledWith(99)
   })
 
@@ -387,7 +394,7 @@ describe('bypass failure cleanup', () => {
     vi.spyOn(holder.fake, 'rememberBypassTab').mockRejectedValueOnce(new Error('storage full'))
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
 
-    await mod.handleBypass(testUrl)
+    await handleBypass(testUrl)
 
     // The rules are installed; a persistence failure must not fail the bypass.
     expect(tabsUpdate).toHaveBeenCalledWith(99, { url: testUrl, active: true })
@@ -398,7 +405,7 @@ describe('bypass failure cleanup', () => {
   })
 
   it('logs a failed tab-close cleanup instead of rejecting unhandled', async () => {
-    await mod.handleBypass(testUrl)
+    await handleBypass(testUrl)
     vi.spyOn(holder.fake, 'forgetBypassTab').mockRejectedValueOnce(new Error('storage full'))
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
 
@@ -412,5 +419,33 @@ describe('bypass failure cleanup', () => {
     // Nothing was torn down on failure — rules and mapping stay consistent.
     expect(holder.fake.sessionRules.size).toBe(2)
     expect(holder.fake.tabRuleIds.size).toBe(1)
+  })
+})
+
+describe('module import side-effect freedom', () => {
+  it('importing ./background registers no listeners and installs no rules', async () => {
+    // The static import above already evaluated the module once under the
+    // full chrome stub, so module-load-time chrome access is no longer
+    // observable that way. Re-evaluate it here under a bare stub — any
+    // surface the module touched at import time (listener registration, DNR
+    // install) would throw, failing the import loudly. This is the same
+    // guard the pre-patch dynamic import provided for the "importing
+    // background.ts has no side effects" criterion.
+    try {
+      vi.stubGlobal('chrome', {} as typeof chrome)
+      vi.resetModules()
+
+      // An import-time DNR install would land on the same fake port holder
+      // (the mock factory forwards to holder.fake at call time).
+      const installSpy = vi.spyOn(holder.fake, 'installInterceptRules')
+      const mod = await import('./background')
+
+      expect(installSpy).not.toHaveBeenCalled()
+      expect(mod.registerBackgroundListeners).toBeTypeOf('function')
+      expect(mod.installRules).toBeTypeOf('function')
+    } finally {
+      // Restore the suite's chrome stub for the remaining tests.
+      vi.stubGlobal('chrome', stubChrome)
+    }
   })
 })

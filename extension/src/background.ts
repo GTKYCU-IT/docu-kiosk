@@ -126,9 +126,15 @@ export async function installRules() {
   }
 }
 
-if (typeof globalThis.chrome !== 'undefined') {
-  void installRules()
-
+/**
+ * Wire the service-worker listeners: toolbar action, navigation logging,
+ * bypass-tab cleanup, and bypass requests. Importing the module has no side
+ * effects — the DNR port is constructed above, but its factory wraps every
+ * chrome.* call in a closure — so tests and other embedders can import it
+ * without a Chrome runtime. Called exactly once by the service-worker entry
+ * (background-main.ts).
+ */
+export function registerBackgroundListeners(): void {
   // Clicking the toolbar icon opens the settings page in a full tab.
   chrome.action.onClicked.addListener(() => {
     void chrome.tabs.create({ url: chrome.runtime.getURL('src/options/index.html') })
