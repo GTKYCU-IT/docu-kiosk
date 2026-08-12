@@ -36,7 +36,7 @@ type Kiosk struct {
 type store interface {
 	UpsertKiosk(ctx context.Context, arg database.UpsertKioskParams) (database.Kiosk, error)
 	GetKioskByIP(ctx context.Context, ip string) (database.Kiosk, error)
-	NameHeldByOther(ctx context.Context, name, ip string) (bool, error)
+	NameHeldByOther(ctx context.Context, ip, name string) (bool, error)
 	ListKiosksByIDs(ctx context.Context, ids []uuid.UUID) ([]database.Kiosk, error)
 }
 
@@ -48,8 +48,8 @@ type dbStore struct {
 	*database.Queries
 }
 
-func (d dbStore) NameHeldByOther(ctx context.Context, name, ip string) (bool, error) {
-	return d.Queries.NameHeldByOther(ctx, database.NameHeldByOtherParams{Name: name, IP: ip})
+func (d dbStore) NameHeldByOther(ctx context.Context, ip, name string) (bool, error) {
+	return d.Queries.NameHeldByOther(ctx, database.NameHeldByOtherParams{IP: ip, Name: name})
 }
 
 // Module is the kiosk directory. It owns registration and identity
@@ -82,9 +82,9 @@ func (m *Module) Register(ctx context.Context, ip, name string) error {
 	}
 
 	id := uuid.New()
-	held, err := m.store.NameHeldByOther(ctx, name, ip)
+	held, err := m.store.NameHeldByOther(ctx, ip, name)
 	if err != nil {
-		return m.logRegisterError(err, name, ip)
+		return m.logRegisterError(err, ip, name)
 	}
 	if held {
 		return ErrNameTaken
@@ -95,11 +95,11 @@ func (m *Module) Register(ctx context.Context, ip, name string) error {
 		// A racing register may have claimed the name between the pre-check
 		// and the write; classify the failure through the store's domain
 		// answer instead of driver error codes.
-		held, lookupErr := m.store.NameHeldByOther(ctx, name, ip)
+		held, lookupErr := m.store.NameHeldByOther(ctx, ip, name)
 		if lookupErr == nil && held {
 			return ErrNameTaken
 		}
-		return m.logRegisterError(err, name, ip)
+		return m.logRegisterError(err, ip, name)
 	}
 	m.logger.Info("kiosk registered", "kiosk_id", row.ID, "name", row.Name, "ip", row.IP)
 	return nil
@@ -107,7 +107,7 @@ func (m *Module) Register(ctx context.Context, ip, name string) error {
 
 // logRegisterError records a register failure with the kiosk context and
 // wraps the underlying error for the caller.
-func (m *Module) logRegisterError(err error, name, ip string) error {
+func (m *Module) logRegisterError(err error, ip, name string) error {
 	m.logger.Error("register kiosk", "error", err, "name", name, "ip", ip)
 	return fmt.Errorf("register kiosk: %w", err)
 }

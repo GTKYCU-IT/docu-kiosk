@@ -66,7 +66,7 @@ type stubStore struct {
 	listCalled   bool
 	upsertCalled bool
 	byName       map[string]database.Kiosk
-	held         func(name, ip string) (bool, error) // optional scripted NameHeldByOther
+	held         func(ip, name string) (bool, error) // optional scripted NameHeldByOther
 	nameChecks   int
 }
 
@@ -78,10 +78,10 @@ func (s *stubStore) UpsertKiosk(_ context.Context, arg database.UpsertKioskParam
 	return database.Kiosk{ID: arg.ID, IP: arg.IP, Name: arg.Name}, nil
 }
 
-func (s *stubStore) NameHeldByOther(_ context.Context, name, ip string) (bool, error) {
+func (s *stubStore) NameHeldByOther(_ context.Context, ip, name string) (bool, error) {
 	s.nameChecks++
 	if s.held != nil {
-		return s.held(name, ip)
+		return s.held(ip, name)
 	}
 	k, ok := s.byName[name]
 	if !ok {
@@ -196,9 +196,13 @@ func TestRegisterNameTakenByOtherKiosk(t *testing.T) {
 		t.Errorf("GetKioskByIP(10.0.0.2) = %v, want ErrNotFound (second kiosk must not be registered)", err)
 	}
 
-	// DO UPDATE-phase conflict: a registered IP re-registering under a name
-	// held by another kiosk hits the upsert's ON CONFLICT(ip) DO UPDATE path
-	// and must still yield ErrNameTaken, not a silent rename.
+	// Pre-check short-circuit: a registered IP re-registering under a name
+	// held by another kiosk is rejected by the NameHeldByOther pre-check
+	// before any upsert is attempted. The upsert's ON CONFLICT(ip) DO UPDATE
+	// path is only reachable via a race between the pre-check and the write,
+	// which TestRegisterNameTakenByRacingRegister exercises with a fake
+	// store; either way the register must yield ErrNameTaken, not a silent
+	// rename.
 	if err := m.Register(ctx, "10.0.0.2", "Branch2"); err != nil {
 		t.Fatalf("Register Branch2: %v", err)
 	}
@@ -340,18 +344,19 @@ func TestRegisterNameTakenByRacingRegister(t *testing.T) {
 	// The name is free at pre-check time, but a racing register claims it
 	// before this upsert lands; the failed upsert is classified as
 	// ErrNameTaken via a second store answer, not a driver error code.
-	checks := 0
 	s := &stubStore{
 		upsertErr: errors.New("write failed"),
-		held: func(name, ip string) (bool, error) {
-			checks++
-			return checks > 1, nil
+		held: func(ip, name string) (bool, error) {
+			return s.nameChecks > 1, nil
 		},
 	}
 	m, buf := newTestModule(s)
 
 	if err := m.Register(context.Background(), "10.0.0.2", "Lobby"); !errors.Is(err, ErrNameTaken) {
 		t.Fatalf("Register = %v, want ErrNameTaken", err)
+	}
+	if s.nameChecks != 2 {
+		t.Errorf("NameHeldByOther called %d times, want 2 (pre-check + race re-check)", s.nameChecks)
 	}
 	if strings.Contains(buf.String(), "level=ERROR") {
 		t.Errorf("name conflict was logged as an error: %s", buf.String())
@@ -361,12 +366,10 @@ func TestRegisterNameTakenByRacingRegister(t *testing.T) {
 func TestRegisterDBFailureLogged(t *testing.T) {
 	// The upsert fails and the follow-up conflict check also errors; the
 	// failure falls through to the logged wrapped-error path (not ErrNameTaken).
-	checks := 0
 	s := &stubStore{
 		upsertErr: errors.New("disk I/O error"),
-		held: func(name, ip string) (bool, error) {
-			checks++
-			if checks > 1 {
+		held: func(ip, name string) (bool, error) {
+			if s.nameChecks > 1 {
 				return false, errors.New("name lookup failed")
 			}
 			return false, nil
@@ -380,6 +383,9 @@ func TestRegisterDBFailureLogged(t *testing.T) {
 	}
 	if errors.Is(err, ErrNameTaken) {
 		t.Fatalf("Register = %v, want wrapped non-conflict error", err)
+	}
+	if s.nameChecks != 2 {
+		t.Errorf("NameHeldByOther called %d times, want 2 (pre-check + post-upsert re-check)", s.nameChecks)
 	}
 	if !strings.Contains(buf.String(), "register kiosk") {
 		t.Errorf("log buffer does not contain %q: %s", "register kiosk", buf.String())

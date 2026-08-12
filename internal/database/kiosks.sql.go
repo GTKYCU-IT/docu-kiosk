@@ -75,17 +75,17 @@ const nameHeldByOther = `-- name: NameHeldByOther :one
 SELECT EXISTS (
     SELECT 1
     FROM kiosks
-    WHERE name = ?1 AND ip != ?2
+    WHERE ip != ?1 AND name = ?2
 ) AS held
 `
 
 type NameHeldByOtherParams struct {
-	Name string
 	IP   string
+	Name string
 }
 
 func (q *Queries) NameHeldByOther(ctx context.Context, arg NameHeldByOtherParams) (bool, error) {
-	row := q.db.QueryRowContext(ctx, nameHeldByOther, arg.Name, arg.IP)
+	row := q.db.QueryRowContext(ctx, nameHeldByOther, arg.IP, arg.Name)
 	var held bool
 	err := row.Scan(&held)
 	return held, err

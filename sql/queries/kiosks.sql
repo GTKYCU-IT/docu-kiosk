@@ -22,7 +22,7 @@ WHERE ip = ?;
 SELECT EXISTS (
     SELECT 1
     FROM kiosks
-    WHERE name = sqlc.arg('name') AND ip != sqlc.arg('ip')
+    WHERE ip != sqlc.arg('ip') AND name = sqlc.arg('name')
 ) AS held;
 
 -- name: ListKiosksByIDs :many
