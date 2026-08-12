@@ -131,15 +131,15 @@ func TestRegisterNewKiosk(t *testing.T) {
 	if err := m.Register(ctx, "10.0.0.1", "Lobby"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	k, err := m.ResolveIdentity(ctx, "10.0.0.1")
+	k, err := m.GetKioskByIP(ctx, "10.0.0.1")
 	if err != nil {
-		t.Fatalf("ResolveIdentity: %v", err)
+		t.Fatalf("GetKioskByIP: %v", err)
 	}
 	if k.ID == uuid.Nil {
-		t.Error("ResolveIdentity returned a zero ID")
+		t.Error("GetKioskByIP returned a zero ID")
 	}
 	if k.IP != "10.0.0.1" || k.Name != "Lobby" {
-		t.Errorf("ResolveIdentity = {%s %s}, want IP 10.0.0.1 Name Lobby", k.IP, k.Name)
+		t.Errorf("GetKioskByIP = {%s %s}, want IP 10.0.0.1 Name Lobby", k.IP, k.Name)
 	}
 }
 
@@ -151,16 +151,16 @@ func TestRegisterIdempotentKeepsIdentity(t *testing.T) {
 	if err := m.Register(ctx, "10.0.0.1", "Lobby"); err != nil {
 		t.Fatalf("first Register: %v", err)
 	}
-	first, err := m.ResolveIdentity(ctx, "10.0.0.1")
+	first, err := m.GetKioskByIP(ctx, "10.0.0.1")
 	if err != nil {
-		t.Fatalf("ResolveIdentity after first register: %v", err)
+		t.Fatalf("GetKioskByIP after first register: %v", err)
 	}
 	if err := m.Register(ctx, "10.0.0.1", "Lobby"); err != nil {
 		t.Fatalf("second Register: %v", err)
 	}
-	second, err := m.ResolveIdentity(ctx, "10.0.0.1")
+	second, err := m.GetKioskByIP(ctx, "10.0.0.1")
 	if err != nil {
-		t.Fatalf("ResolveIdentity after second register: %v", err)
+		t.Fatalf("GetKioskByIP after second register: %v", err)
 	}
 	if second.ID != first.ID {
 		t.Errorf("identity changed across re-registration: %s -> %s", first.ID, second.ID)
@@ -175,19 +175,19 @@ func TestRegisterSameIPRenames(t *testing.T) {
 	if err := m.Register(ctx, "10.0.0.1", "A"); err != nil {
 		t.Fatalf("Register A: %v", err)
 	}
-	before, err := m.ResolveIdentity(ctx, "10.0.0.1")
+	before, err := m.GetKioskByIP(ctx, "10.0.0.1")
 	if err != nil {
-		t.Fatalf("ResolveIdentity before rename: %v", err)
+		t.Fatalf("GetKioskByIP before rename: %v", err)
 	}
 	if err := m.Register(ctx, "10.0.0.1", "B"); err != nil {
 		t.Fatalf("Register B: %v", err)
 	}
-	after, err := m.ResolveIdentity(ctx, "10.0.0.1")
+	after, err := m.GetKioskByIP(ctx, "10.0.0.1")
 	if err != nil {
-		t.Fatalf("ResolveIdentity after rename: %v", err)
+		t.Fatalf("GetKioskByIP after rename: %v", err)
 	}
 	if after.Name != "B" {
-		t.Errorf("ResolveIdentity.Name = %q, want B", after.Name)
+		t.Errorf("GetKioskByIP.Name = %q, want B", after.Name)
 	}
 	if after.ID != before.ID {
 		t.Errorf("rename changed identity: %s -> %s", before.ID, after.ID)
@@ -208,15 +208,15 @@ func TestRegisterNameTakenByOtherKiosk(t *testing.T) {
 	if strings.Contains(buf.String(), "level=ERROR") {
 		t.Errorf("name conflict was logged as an error: %s", buf.String())
 	}
-	original, err := m.ResolveIdentity(ctx, "10.0.0.1")
+	original, err := m.GetKioskByIP(ctx, "10.0.0.1")
 	if err != nil {
-		t.Fatalf("ResolveIdentity original: %v", err)
+		t.Fatalf("GetKioskByIP original: %v", err)
 	}
 	if original.Name != "Lobby" {
 		t.Errorf("original kiosk name changed to %q", original.Name)
 	}
-	if _, err := m.ResolveIdentity(ctx, "10.0.0.2"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("ResolveIdentity(10.0.0.2) = %v, want ErrNotFound (second kiosk must not be registered)", err)
+	if _, err := m.GetKioskByIP(ctx, "10.0.0.2"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetKioskByIP(10.0.0.2) = %v, want ErrNotFound (second kiosk must not be registered)", err)
 	}
 
 	// DO UPDATE-phase conflict: a registered IP re-registering under a name
@@ -228,9 +228,9 @@ func TestRegisterNameTakenByOtherKiosk(t *testing.T) {
 	if err := m.Register(ctx, "10.0.0.2", "Lobby"); !errors.Is(err, ErrNameTaken) {
 		t.Fatalf("Register(10.0.0.2, Lobby) = %v, want ErrNameTaken", err)
 	}
-	kept, err := m.ResolveIdentity(ctx, "10.0.0.2")
+	kept, err := m.GetKioskByIP(ctx, "10.0.0.2")
 	if err != nil {
-		t.Fatalf("ResolveIdentity(10.0.0.2) after conflict: %v", err)
+		t.Fatalf("GetKioskByIP(10.0.0.2) after conflict: %v", err)
 	}
 	if kept.Name != "Branch2" {
 		t.Errorf("10.0.0.2 name changed to %q, want Branch2", kept.Name)
@@ -239,12 +239,12 @@ func TestRegisterNameTakenByOtherKiosk(t *testing.T) {
 
 // --- Identity ---
 
-func TestResolveIdentityUnknownIP(t *testing.T) {
+func TestGetKioskByIPUnknownIP(t *testing.T) {
 	db := newTestDB(t)
 	m := testModule(db)
 
-	if _, err := m.ResolveIdentity(context.Background(), "10.0.0.99"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("ResolveIdentity = %v, want ErrNotFound", err)
+	if _, err := m.GetKioskByIP(context.Background(), "10.0.0.99"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetKioskByIP = %v, want ErrNotFound", err)
 	}
 }
 
@@ -268,9 +268,9 @@ func TestListLiveOrdersByName(t *testing.T) {
 		if err := m.Register(ctx, r.ip, r.name); err != nil {
 			t.Fatalf("Register(%s): %v", r.name, err)
 		}
-		k, err := m.ResolveIdentity(ctx, r.ip)
+		k, err := m.GetKioskByIP(ctx, r.ip)
 		if err != nil {
-			t.Fatalf("ResolveIdentity(%s): %v", r.ip, err)
+			t.Fatalf("GetKioskByIP(%s): %v", r.ip, err)
 		}
 		ids[r.name] = k.ID
 	}

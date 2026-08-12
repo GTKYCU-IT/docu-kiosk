@@ -126,7 +126,7 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 	s := &server{
 		db:             db,
 		kiosks:         kioskModule,
-		hub:            hub.New(kioskStore{kioskModule}, logger),
+		hub:            hub.New(kioskModule, logger),
 		authModule:     authModule,
 		port:           cfg.Port,
 		logger:         logger,
