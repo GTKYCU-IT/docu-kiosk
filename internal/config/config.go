@@ -91,27 +91,16 @@ func Load() (Config, error) {
 		}
 	}
 
-	if raw := os.Getenv("DOCU_KIOSK_JWT_TTL"); raw == "" {
-		cfg.JWTTTL = defaultJWTTTL
-	} else {
-		ttl, err := parseDurationEnv(raw, "DOCU_KIOSK_JWT_TTL")
-		if err != nil {
-			return Config{}, err
-		}
-		cfg.JWTTTL = ttl
-	}
-
-	if raw := os.Getenv("DOCU_KIOSK_REFRESH_TTL"); raw == "" {
-		cfg.RefreshTTL = defaultRefreshTTL
-	} else {
-		ttl, err := parseDurationEnv(raw, "DOCU_KIOSK_REFRESH_TTL")
-		if err != nil {
-			return Config{}, err
-		}
-		cfg.RefreshTTL = ttl
-	}
-
 	var err error
+	cfg.JWTTTL, err = envDuration("DOCU_KIOSK_JWT_TTL", defaultJWTTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.RefreshTTL, err = envDuration("DOCU_KIOSK_REFRESH_TTL", defaultRefreshTTL)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg.CORSOrigins, err = parseCORSOrigins(os.Getenv("CORS_ORIGINS"))
 	if err != nil {
 		return Config{}, err
@@ -125,8 +114,18 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+// envDuration reads a duration env var, falling back to def when unset and
+// failing startup on unparsable or non-positive values.
+func envDuration(key string, def time.Duration) (time.Duration, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def, nil
+	}
+	return parseDurationEnv(raw, key)
+}
+
 // parseDurationEnv parses a token-lifetime env var as a Go duration (e.g.
-// "15s", "720h"). Empty values are handled by the caller (they mean "use the
+// "15s", "720h"). Empty values are handled by envDuration (they mean "use the
 // default"); anything unparsable or non-positive fails startup.
 func parseDurationEnv(raw, name string) (time.Duration, error) {
 	ttl, err := time.ParseDuration(raw)

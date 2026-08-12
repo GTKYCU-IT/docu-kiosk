@@ -15,8 +15,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// testJWTTTL and testRefreshTTL mirror the config defaults; the seam tests
-// pass them to newAuthModule so token behavior matches production.
+// testJWTTTL and testRefreshTTL mirror the config defaults
+// (internal/config/config.go: defaultJWTTTL / defaultRefreshTTL); the seam
+// tests pass them to newAuthModule so token behavior matches production.
+// Keep them in sync with those constants — drift here changes token behavior
+// in tests only.
 const (
 	testJWTTTL     = 15 * time.Second
 	testRefreshTTL = 60 * 24 * time.Hour
@@ -213,12 +216,13 @@ func TestValidateRejectsForgedToken(t *testing.T) {
 	}
 }
 
-// fakeStore is a scriptable store for AuthModule tests. It embeds the store
-// interface so methods a test does not exercise are promoted (and would panic
-// on a nil embedded interface), and overrides exactly the methods each
-// scenario drives.
+// fakeStore is a scriptable store for AuthModule tests. Every store method is
+// implemented explicitly — no nil interface promotion — so a test reaches a
+// method only by stubbing it. The seam methods (GetUserByUsername,
+// GetRefreshToken, MakeRefreshToken, RevokeRefreshToken) carry scripted
+// results per scenario; GetUser fails loudly and intentionally, so any test
+// that drives it must replace the stub.
 type fakeStore struct {
-	store
 	userByUsername      database.User
 	userByUsernameErr   error
 	refreshToken        database.RefreshToken
@@ -226,6 +230,10 @@ type fakeStore struct {
 	makeRefreshToken    database.RefreshToken
 	makeRefreshTokenErr error
 	revokeErr           error
+}
+
+func (f *fakeStore) GetUser(_ context.Context, _ uuid.UUID) (database.User, error) {
+	return database.User{}, errors.New("get user: not stubbed")
 }
 
 func (f *fakeStore) GetUserByUsername(_ context.Context, _ string) (database.User, error) {
