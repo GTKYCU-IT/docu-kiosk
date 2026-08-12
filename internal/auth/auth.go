@@ -35,32 +35,62 @@ type store interface {
 	RevokeRefreshToken(ctx context.Context, token string) error
 }
 
+// TokenLifetimes bundles the two token lifetimes AuthModule issues tokens
+// with: the short-lived JWT and the long-lived refresh token. Carrying the
+// pair as one value keeps them together across constructor call sites, so
+// callers cannot swap or drop one of them.
+type TokenLifetimes struct {
+	JWTTTL     time.Duration // lifetime of issued JWTs
+	RefreshTTL time.Duration // lifetime of issued refresh tokens
+}
+
 // AuthModule owns login, refresh rotation, and JWT validation. It is the
 // single seam for authentication logic — HTTP handlers become thin adapters
 // that parse JSON and call these methods. Token lifetimes are injected so the
 // policy lives in config, not here.
 type AuthModule struct {
-	store      store
-	jwtKey     []byte
-	jwtTTL     time.Duration
-	refreshTTL time.Duration
+	store     store
+	jwtKey    []byte
+	lifetimes TokenLifetimes
 }
 
 // NewAuthModule creates an AuthModule that persists through db, signs JWTs
 // with jwtKey, and issues tokens with the given lifetimes. The key must be at
 // least 32 bytes; anything shorter is rejected so a misconfiguration fails at
 // startup instead of producing forgeable tokens.
-func NewAuthModule(db *database.Queries, jwtKey []byte, jwtTTL, refreshTTL time.Duration) (*AuthModule, error) {
+func NewAuthModule(db *database.Queries, jwtKey []byte, lifetimes TokenLifetimes) (*AuthModule, error) {
 	if len(jwtKey) < minJWTKeyLen {
 		return nil, fmt.Errorf("jwt key must be at least %d bytes, got %d", minJWTKeyLen, len(jwtKey))
 	}
-	return newAuthModule(db, jwtKey, jwtTTL, refreshTTL), nil
+	return newAuthModule(db, jwtKey, lifetimes), nil
 }
 
 // newAuthModule builds an AuthModule around any store; tests use it with a
 // fake.
-func newAuthModule(s store, jwtKey []byte, jwtTTL, refreshTTL time.Duration) *AuthModule {
-	return &AuthModule{store: s, jwtKey: jwtKey, jwtTTL: jwtTTL, refreshTTL: refreshTTL}
+func newAuthModule(s store, jwtKey []byte, lifetimes TokenLifetimes) *AuthModule {
+	return &AuthModule{store: s, jwtKey: jwtKey, lifetimes: lifetimes}
+}
+
+// newRefreshToken creates and persists a refresh token for userID, expiring
+// after the module's refresh TTL.
+func (a *AuthModule) newRefreshToken(ctx context.Context, userID uuid.UUID) (database.RefreshToken, error) {
+	rt, err := a.store.MakeRefreshToken(ctx, database.MakeRefreshTokenParams{
+		UserID:    userID,
+		ExpiresAt: time.Now().UTC().Add(a.lifetimes.RefreshTTL),
+	})
+	if err != nil {
+		return database.RefreshToken{}, fmt.Errorf("create refresh token: %w", err)
+	}
+	return rt, nil
+}
+
+// signJWT signs a JWT for userID, expiring after the module's JWT TTL.
+func (a *AuthModule) signJWT(userID uuid.UUID) (string, error) {
+	jwt, err := generateJWT(userID, a.jwtKey, a.lifetimes.JWTTTL)
+	if err != nil {
+		return "", fmt.Errorf("generate jwt: %w", err)
+	}
+	return jwt, nil
 }
 
 // Login authenticates a user by username and password, returning a short-lived
@@ -76,17 +106,14 @@ func (a *AuthModule) Login(ctx context.Context, username, password string) (jwt 
 		return "", "", ErrInvalidCredentials
 	}
 
-	jwt, err = generateJWT(user.ID, a.jwtKey, a.jwtTTL)
+	jwt, err = a.signJWT(user.ID)
 	if err != nil {
-		return "", "", fmt.Errorf("generate jwt: %w", err)
+		return "", "", err
 	}
 
-	rt, err := a.store.MakeRefreshToken(ctx, database.MakeRefreshTokenParams{
-		UserID:    user.ID,
-		ExpiresAt: time.Now().UTC().Add(a.refreshTTL),
-	})
+	rt, err := a.newRefreshToken(ctx, user.ID)
 	if err != nil {
-		return "", "", fmt.Errorf("create refresh token: %w", err)
+		return "", "", err
 	}
 
 	return jwt, rt.Token, nil
@@ -105,21 +132,18 @@ func (a *AuthModule) RotateRefresh(ctx context.Context, token string) (jwt strin
 		return "", "", ErrInvalidRefreshToken
 	}
 
-	jwt, err = generateJWT(rt.UserID, a.jwtKey, a.jwtTTL)
+	jwt, err = a.signJWT(rt.UserID)
 	if err != nil {
-		return "", "", fmt.Errorf("generate jwt: %w", err)
+		return "", "", err
 	}
 
 	if err := a.store.RevokeRefreshToken(ctx, rt.Token); err != nil {
 		return "", "", fmt.Errorf("revoke refresh token: %w", err)
 	}
 
-	newRT, err := a.store.MakeRefreshToken(ctx, database.MakeRefreshTokenParams{
-		UserID:    rt.UserID,
-		ExpiresAt: time.Now().UTC().Add(a.refreshTTL),
-	})
+	newRT, err := a.newRefreshToken(ctx, rt.UserID)
 	if err != nil {
-		return "", "", fmt.Errorf("create refresh token: %w", err)
+		return "", "", err
 	}
 
 	return jwt, newRT.Token, nil

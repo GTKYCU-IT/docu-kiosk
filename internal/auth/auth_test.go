@@ -25,6 +25,9 @@ const (
 	testRefreshTTL = 60 * 24 * time.Hour
 )
 
+// testLifetimes bundles the test TTLs for constructor call sites.
+var testLifetimes = TokenLifetimes{JWTTTL: testJWTTTL, RefreshTTL: testRefreshTTL}
+
 func newTestDB(t *testing.T) (*sql.DB, *database.Queries) {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
@@ -50,7 +53,7 @@ func newTestDB(t *testing.T) (*sql.DB, *database.Queries) {
 func newTestModule(t *testing.T) (*AuthModule, *database.Queries, *sql.DB) {
 	t.Helper()
 	db, queries := newTestDB(t)
-	module, err := NewAuthModule(queries, []byte(testSecret), testJWTTTL, testRefreshTTL)
+	module, err := NewAuthModule(queries, []byte(testSecret), testLifetimes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +77,7 @@ func createTestUser(t *testing.T, queries *database.Queries, username, password 
 
 func TestNewAuthModuleRejectsShortKey(t *testing.T) {
 	_, queries := newTestDB(t)
-	if _, err := NewAuthModule(queries, []byte("short"), testJWTTTL, testRefreshTTL); err == nil {
+	if _, err := NewAuthModule(queries, []byte("short"), testLifetimes); err == nil {
 		t.Error("expected error for short jwt key")
 	}
 }
@@ -255,7 +258,7 @@ func (f *fakeStore) RevokeRefreshToken(_ context.Context, _ string) error {
 // newFakeModule builds an AuthModule around a fake store, proving the seam
 // (not the concrete *database.Queries) carries the operations.
 func newFakeModule(s store) *AuthModule {
-	return newAuthModule(s, []byte(testSecret), testJWTTTL, testRefreshTTL)
+	return newAuthModule(s, []byte(testSecret), testLifetimes)
 }
 
 // A store failure while looking up the user must map to
