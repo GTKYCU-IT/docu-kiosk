@@ -2,8 +2,8 @@
 // Load is the only place in the codebase that reads environment variables;
 // everything downstream receives the parsed Config struct. Both comma-separated
 // lists (CORS_ORIGINS and TRUSTED_PROXIES) are parsed and validated here:
-// CORSOrigins holds the normalized allowlist, and the server applies its
-// default allowlist when it is empty.
+// CORSOrigins holds the effective allowlist, with the default applied by Load
+// when CORS_ORIGINS is unset.
 package config
 
 import (
@@ -13,22 +13,35 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// Config holds every broker setting. CORSOrigins is the normalized CORS
-// allowlist (nil/empty means unconfigured — the server applies its default);
-// TrustedProxies is parsed here so malformed entries fail startup. JWTTTL and
-// RefreshTTL are the broker's one policy location for token lifetimes.
+// defaultCORSOrigins is the allowlist Load applies when CORS_ORIGINS is
+// unset: any Chrome extension, since the extension ID varies per build. The
+// default lives here — the single module that owns the CORS policy.
+var defaultCORSOrigins = []string{"chrome-extension://"}
+
+// DefaultCORSOrigins returns the default CORS allowlist as a fresh slice.
+// Load applies it when CORS_ORIGINS is unset; callers may mutate the
+// returned slice freely without affecting the package's internal default.
+func DefaultCORSOrigins() []string {
+	return slices.Clone(defaultCORSOrigins)
+}
+
+// Config holds every broker setting. CORSOrigins is the effective CORS
+// allowlist (Load substitutes the default when CORS_ORIGINS is unset);
+// TrustedProxies is parsed here so malformed entries fail startup. JWTTTL
+// and RefreshTTL are the broker's one policy location for token lifetimes.
 type Config struct {
 	Port           int    // default 8080
 	TokenSecret    []byte // DOCU_KIOSK_TOKEN_SECRET
 	AdminUsername  string // AUTH_USERNAME
 	AdminPassword  string // AUTH_PASSWORD
 	LogLevel       slog.Level
-	CORSOrigins    []string       // normalized allowlist from CORS_ORIGINS; nil/empty means the server applies its default allowlist
+	CORSOrigins    []string       // effective allowlist from CORS_ORIGINS; Load applies the default when unset
 	TrustedProxies []netip.Prefix // parsed from TRUSTED_PROXIES; nil when unset
 	JWTTTL         time.Duration  // DOCU_KIOSK_JWT_TTL (default 15s)
 	RefreshTTL     time.Duration  // DOCU_KIOSK_REFRESH_TTL (default 60 days)
@@ -107,6 +120,11 @@ func Load() (Config, error) {
 	cfg.CORSOrigins, err = parseCORSOrigins(os.Getenv("CORS_ORIGINS"))
 	if err != nil {
 		return Config{}, err
+	}
+	if len(cfg.CORSOrigins) == 0 {
+		// Unset CORS_ORIGINS: apply the default allowlist here so the
+		// effective policy is decided in exactly one module.
+		cfg.CORSOrigins = DefaultCORSOrigins()
 	}
 
 	cfg.TrustedProxies, err = ParseTrustedProxies(os.Getenv("TRUSTED_PROXIES"))

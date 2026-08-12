@@ -34,7 +34,7 @@ export default defineManifest((config) => ({
   ],
 
   background: {
-    "service_worker": "src/background.ts"
+    "service_worker": "src/background-main.ts"
   },
 
   options_page: 'src/options/index.html',

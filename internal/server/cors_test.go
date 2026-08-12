@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/calvertjadon/docu-kiosk/internal/config"
 	"github.com/coder/websocket"
 )
 
@@ -33,10 +34,13 @@ func corsTestServer(t *testing.T, origins ...string) *httptest.Server {
 	return ts
 }
 
-func TestNewCORSConfigAllowlist(t *testing.T) {
+// TestNewCORSConfigPassthrough pins that newCORSConfig applies no default of
+// its own: config.Load owns the policy and supplies the effective allowlist,
+// so the server passes it through verbatim.
+func TestNewCORSConfigPassthrough(t *testing.T) {
 	cfg := newCORSConfig(nil, discardLogger())
-	if len(cfg.allowedOrigins) != 1 || cfg.allowedOrigins[0] != "chrome-extension://" {
-		t.Fatalf("default allowedOrigins = %v, want [chrome-extension://]", cfg.allowedOrigins)
+	if len(cfg.allowedOrigins) != 0 {
+		t.Fatalf("allowedOrigins = %v, want empty (the default lives in config.Load)", cfg.allowedOrigins)
 	}
 
 	origins := []string{"https://admin.example.com"}
@@ -85,7 +89,10 @@ func TestCORSMiddleware(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "chrome extension origin allowed by default",
+			// origins mirrors the default config.Load supplies; the
+			// middleware itself no longer applies a default.
+			name:       "chrome extension origin allowed by default allowlist",
+			origins:    config.DefaultCORSOrigins(),
 			origin:     "chrome-extension://ndmpfjhihnpgakamhhdcpjemakdgmkcp",
 			host:       "kiosk.local:8080",
 			method:     http.MethodGet,
@@ -245,5 +252,58 @@ func TestKioskRegistrationSameOrigin(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusNoContent {
 		t.Fatalf("same-origin registration = %d, want %d", res.StatusCode, http.StatusNoContent)
+	}
+}
+
+// TestWSHubGateRejectsCrossOrigin proves the origin policy is enforced inside
+// the hub itself, not only by the CORS middleware: Serve is called directly
+// (middleware bypassed) with a hostile Origin and the handshake is rejected
+// before the socket is accepted.
+func TestWSHubGateRejectsCrossOrigin(t *testing.T) {
+	s, _ := setupTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Origin", "https://evil.example.com")
+	rec := httptest.NewRecorder()
+	s.hub.Serve(rec, req, "10.0.0.99")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("hub gate status = %d, want 403", rec.Code)
+	}
+	if rec.Body.String() != "origin rejected\n" {
+		t.Fatalf("hub gate body = %q, want %q", rec.Body.String(), "origin rejected\n")
+	}
+}
+
+// TestWSHubGateAllowsSameOrigin proves the hub gate admits a same-origin
+// request, which then proceeds to the normal Serve flow (auth rejects the
+// unknown IP here — the gate itself passed).
+func TestWSHubGateAllowsSameOrigin(t *testing.T) {
+	s, _ := setupTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Origin", "http://"+req.Host)
+	rec := httptest.NewRecorder()
+	s.hub.Serve(rec, req, "10.0.0.99")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("hub gate status = %d, want 401 from the auth step", rec.Code)
+	}
+}
+
+// TestWSHubGateAllowsAllowlistedOrigin proves the hub gate also admits an
+// origin on the configured allowlist (here the config default, which any
+// Chrome extension matches): Serve is called directly with the allowlisted
+// Origin and the request proceeds to the normal Serve flow, where auth
+// rejects the unknown IP — the gate itself passed.
+func TestWSHubGateAllowsAllowlistedOrigin(t *testing.T) {
+	cfg := testConfig()
+	cfg.CORSOrigins = config.DefaultCORSOrigins()
+	s, err := NewServer(cfg, newTestDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Origin", "chrome-extension://abc")
+	rec := httptest.NewRecorder()
+	s.hub.Serve(rec, req, "10.0.0.99")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("hub gate status = %d, want 401 from the auth step", rec.Code)
 	}
 }

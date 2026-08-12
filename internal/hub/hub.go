@@ -3,6 +3,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,10 +11,38 @@ import (
 	"sync"
 	"time"
 
-	"github.com/calvertjadon/docu-kiosk/internal/protocol"
+	"github.com/calvertjadon/docu-kiosk/internal/kiosks"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 )
+
+// Wire message shapes. The broker is the only sender: a greeting is written
+// when a kiosk connects, and sign instructions are pushed on demand. The
+// field order below is the wire order, so it must not change without a
+// coordinated browser-client update (web/src/lib/broker.ts).
+type greeting struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+func newGreeting(name string) greeting {
+	return greeting{Name: name, Type: "connected"}
+}
+
+type sign struct {
+	Type string `json:"type"`
+	URL  string `json:"url"`
+}
+
+func newSign(url string) sign {
+	return sign{Type: "sign", URL: url}
+}
+
+// marshal is the single wire-marshal path for kiosk messages. All messages
+// sent to kiosks must be serialized through this function.
+func marshal(v any) ([]byte, error) {
+	return json.Marshal(v)
+}
 
 // ErrNotConnected is returned when sending to a kiosk with no live session.
 var ErrNotConnected = errors.New("kiosk not connected")
@@ -21,19 +50,10 @@ var ErrNotConnected = errors.New("kiosk not connected")
 // ErrWriteFailed is returned when a session exists but the socket write fails.
 var ErrWriteFailed = errors.New("write to kiosk failed")
 
-// ErrKioskNotFound is returned when auth lookup finds no kiosk for the IP.
-var ErrKioskNotFound = errors.New("kiosk not found")
-
-// Kiosk identifies a kiosk authorized to connect.
-type Kiosk struct {
-	ID   uuid.UUID
-	Name string
-}
-
-// KioskStore is the auth seam. Implemented by the server's DB adapter
-// (production) and by a map-based fake (tests).
+// KioskStore is the auth seam. Implemented by the kiosks module (production)
+// and by a map-based fake (tests).
 type KioskStore interface {
-	GetKioskByIP(ctx context.Context, ip string) (Kiosk, error)
+	GetKioskByIP(ctx context.Context, ip string) (kiosks.Kiosk, error)
 }
 
 // conn is the subset of *websocket.Conn the hub drives.
@@ -44,9 +64,29 @@ type conn interface {
 	CloseNow() error
 }
 
+// OriginPolicy decides whether a connection may be accepted. It receives the
+// full request so the policy can inspect the Origin header and the request
+// host. The policy is the hub's own security gate: it runs before the socket
+// is accepted, so a Hub fails closed even when used without the server's CORS
+// middleware.
+type OriginPolicy func(r *http.Request) bool
+
+// Option configures a Hub.
+type Option func(*Hub)
+
+// WithOriginPolicy injects the connection policy Serve enforces before
+// accepting a socket. Without it a Hub rejects every connection (fail
+// closed): opening the module to connections is an explicit caller decision.
+func WithOriginPolicy(p OriginPolicy) Option {
+	return func(h *Hub) {
+		h.originPolicy = p
+	}
+}
+
 type Hub struct {
 	store        KioskStore
 	logger       *slog.Logger
+	originPolicy OriginPolicy
 	mu           sync.RWMutex
 	sessions     map[uuid.UUID]conn
 	pingInterval time.Duration
@@ -55,23 +95,37 @@ type Hub struct {
 
 // New returns a Hub that authenticates kiosks against store and logs through
 // logger. pingInterval and pingTimeout default to 30s and 5s and are mutable
-// by package-hub tests.
-func New(store KioskStore, logger *slog.Logger) *Hub {
-	return &Hub{
+// by package-hub tests. By default the origin policy rejects every
+// connection; callers must inject one via WithOriginPolicy.
+func New(store KioskStore, logger *slog.Logger, opts ...Option) *Hub {
+	h := &Hub{
 		store:        store,
 		logger:       logger,
 		sessions:     make(map[uuid.UUID]conn),
 		pingInterval: 30 * time.Second,
 		pingTimeout:  5 * time.Second,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // Serve accepts the WebSocket, authenticates the kiosk IP against the store,
 // and runs the session until disconnect. Blocks for the connection lifetime.
+// The origin policy is the module's own security gate and runs first: a
+// connection is never authenticated, let alone accepted, unless the injected
+// policy admits it.
 func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, kioskIP string) {
+	if h.originPolicy == nil || !h.originPolicy(r) {
+		h.logger.Warn("ws connect rejected: origin policy", "ip", kioskIP, "origin", r.Header.Get("Origin"))
+		http.Error(w, "origin rejected", http.StatusForbidden)
+		return
+	}
+
 	k, err := h.store.GetKioskByIP(r.Context(), kioskIP)
 	if err != nil {
-		if errors.Is(err, ErrKioskNotFound) {
+		if errors.Is(err, kiosks.ErrNotFound) {
 			h.logger.Warn("ws connect rejected: unregistered ip", "ip", kioskIP)
 			http.Error(w, "unregistered ip", http.StatusUnauthorized)
 			return
@@ -81,8 +135,13 @@ func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, kioskIP string) {
 		return
 	}
 
-	// InsecureSkipVerify is safe here: the broker runs on an internal network
-	// and the Vite dev proxy changes the Origin host during development.
+	// InsecureSkipVerify is safe here because the origin policy above is the
+	// gate: it runs before Accept and has already rejected every origin the
+	// module does not trust. Accept performs no origin verification of its
+	// own once the flag is set, so the injected policy is not a duplicate of
+	// Accept's check but the replacement for it — the thing that makes
+	// InsecureSkipVerify safe — and skipping Accept's check is what lets the
+	// Vite dev proxy rewrite the Origin host during development.
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	})
@@ -91,18 +150,18 @@ func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, kioskIP string) {
 		return
 	}
 
-	h.runSession(r.Context(), k, kioskIP, c)
+	h.runSession(r.Context(), k, c)
 }
 
 // runSession drives one kiosk connection through register, greeting, ping, and
 // read, cleaning up the session on exit.
-func (h *Hub) runSession(ctx context.Context, k Kiosk, ip string, c conn) {
+func (h *Hub) runSession(ctx context.Context, k kiosks.Kiosk, c conn) {
 	defer c.CloseNow()
 
 	h.mu.Lock()
 	h.sessions[k.ID] = c
 	h.mu.Unlock()
-	h.logger.Info("kiosk connected", "kiosk_id", k.ID, "name", k.Name, "ip", ip)
+	h.logger.Info("kiosk connected", "kiosk_id", k.ID, "name", k.Name, "ip", k.IP)
 	defer func() {
 		h.mu.Lock()
 		if h.sessions[k.ID] == c {
@@ -112,7 +171,7 @@ func (h *Hub) runSession(ctx context.Context, k Kiosk, ip string, c conn) {
 		h.logger.Info("kiosk disconnected", "kiosk_id", k.ID, "name", k.Name)
 	}()
 
-	data, err := protocol.Marshal(protocol.NewGreeting(k.Name))
+	data, err := marshal(newGreeting(k.Name))
 	if err != nil {
 		h.logger.Error("marshal greeting", "error", err, "kiosk_id", k.ID)
 		return
@@ -127,6 +186,9 @@ func (h *Hub) runSession(ctx context.Context, k Kiosk, ip string, c conn) {
 
 	go h.pingLoop(ctx, cancel, c)
 
+	// Kiosks are receive-only: they never send application frames, so every
+	// inbound frame is intentionally discarded. Reads exist purely to observe
+	// connection errors and context cancellation.
 	for {
 		if _, _, err := c.Read(ctx); err != nil {
 			return
@@ -156,15 +218,15 @@ func (h *Hub) pingLoop(ctx context.Context, cancel context.CancelFunc, c conn) {
 	}
 }
 
-// Send writes a protocol message to the kiosk session. Unregistered ->
-// ErrNotConnected (Warn-logged). Registered but write fails -> ErrWriteFailed
-// wrapping the write error (Error-logged with kiosk_id). Send reports success
-// only when the session that received the write is still the live session on
-// completion; a kiosk that reconnects or disconnects mid-write yields
-// ErrWriteFailed (Warn-logged), even when the stale conn accepted the write.
-// Logging of failures lives INSIDE Send.
-func (h *Hub) Send(ctx context.Context, id uuid.UUID, msg protocol.Message) error {
-	data, err := protocol.Marshal(msg)
+// PushSign instructs a connected kiosk to open a signing session at url.
+// Unregistered -> ErrNotConnected (Warn-logged). Registered but write fails
+// -> ErrWriteFailed wrapping the write error (Error-logged with kiosk_id).
+// PushSign reports success only when the session that received the write is
+// still the live session on completion; a kiosk that reconnects or
+// disconnects mid-write yields ErrWriteFailed (Warn-logged), even when the
+// stale conn accepted the write. Logging of failures lives INSIDE PushSign.
+func (h *Hub) PushSign(ctx context.Context, id uuid.UUID, url string) error {
+	data, err := marshal(newSign(url))
 	if err != nil {
 		h.logger.Error("push failed: marshal", "error", err, "kiosk_id", id)
 		return err
@@ -208,8 +270,8 @@ func (h *Hub) Send(ctx context.Context, id uuid.UUID, msg protocol.Message) erro
 
 // sessionState reports whether id still maps to a live session and, if so,
 // whether that session is a different conn than c (i.e. a replacement took
-// over). Send calls it only after a Write completes; no lock is held across
-// the Write itself.
+// over). PushSign calls it only after a Write completes; no lock is held
+// across the Write itself.
 func (h *Hub) sessionState(id uuid.UUID, c conn) (still, replaced bool) {
 	h.mu.RLock()
 	cur, ok := h.sessions[id]

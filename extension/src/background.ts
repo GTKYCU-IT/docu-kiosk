@@ -1,4 +1,5 @@
 import { createChromeDnrPort, type DnrPort } from './dnr-port'
+import { INTERCEPT_HASH_PREFIX, BYPASS_MESSAGE_TYPE } from './lib/broker-client'
 
 /**
  * Signing entry-point URL patterns on DocuSign's hosts.
@@ -27,7 +28,7 @@ const dnrPort: DnrPort = createChromeDnrPort()
 export function buildRules(interceptBaseUrl: string): chrome.declarativeNetRequest.Rule[] {
   const action: chrome.declarativeNetRequest.RuleAction = {
     type: 'redirect',
-    redirect: { regexSubstitution: `${interceptBaseUrl}#url=\\0` }
+    redirect: { regexSubstitution: `${interceptBaseUrl}${INTERCEPT_HASH_PREFIX}\\0` }
   }
   const mainFrame: chrome.declarativeNetRequest.ResourceType[] = [
     'main_frame' as chrome.declarativeNetRequest.ResourceType
@@ -125,9 +126,15 @@ export async function installRules() {
   }
 }
 
-if (typeof globalThis.chrome !== 'undefined') {
-  void installRules()
-
+/**
+ * Wire the service-worker listeners: toolbar action, navigation logging,
+ * bypass-tab cleanup, and bypass requests. Importing the module has no side
+ * effects — the DNR port is constructed above, but its factory wraps every
+ * chrome.* call in a closure — so tests and other embedders can import it
+ * without a Chrome runtime. Called exactly once by the service-worker entry
+ * (background-main.ts).
+ */
+export function registerBackgroundListeners(): void {
   // Clicking the toolbar icon opens the settings page in a full tab.
   chrome.action.onClicked.addListener(() => {
     void chrome.tabs.create({ url: chrome.runtime.getURL('src/options/index.html') })
@@ -154,7 +161,7 @@ if (typeof globalThis.chrome !== 'undefined') {
 
   // Bypass: listen for bypass requests from the intercepted page.
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message?.type === 'bypass' && typeof message.url === 'string') {
+    if (message?.type === BYPASS_MESSAGE_TYPE && typeof message.url === 'string') {
       handleBypass(message.url).then(
         () => sendResponse(),
         (err: unknown) => sendResponse({ error: String(err) })

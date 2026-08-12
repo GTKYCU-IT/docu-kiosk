@@ -28,7 +28,7 @@ describe.skipIf(!hasDist)('packaged extension (dist/)', () => {
 
   it('emits a background service worker that installs the interception rules', () => {
     const bgFile = readdirSync(join(distDir, 'assets'))
-      .find((f) => f.startsWith('background.ts-') && f.endsWith('.js'))
+      .find((f) => f.startsWith('background-main.ts-') && f.endsWith('.js'))
     expect(bgFile).toBeTruthy()
     const code = readFileSync(join(distDir, 'assets', bgFile!), 'utf8')
     expect(code).toContain('updateDynamicRules')

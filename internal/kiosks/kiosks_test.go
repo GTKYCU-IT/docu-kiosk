@@ -15,7 +15,7 @@ import (
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/google/uuid"
 	"github.com/pressly/goose/v3"
-	sqlite "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // register the sqlite driver for newTestDB
 )
 
 // newTestDB returns a goose-migrated in-memory SQLite database, closed
@@ -61,29 +61,33 @@ func newTestModule(s store) (*Module, *bytes.Buffer) {
 // each test exercises.
 type stubStore struct {
 	store
-	upsertErr  error
-	nameErr    error
-	listErr    error
-	listCalled bool
-	byName     map[string]database.Kiosk
+	upsertErr    error
+	listErr      error
+	listCalled   bool
+	upsertCalled bool
+	byName       map[string]database.Kiosk
+	held         func(ip, name string) (bool, error) // optional scripted NameHeldByOther
+	nameChecks   int
 }
 
 func (s *stubStore) UpsertKiosk(_ context.Context, arg database.UpsertKioskParams) (database.Kiosk, error) {
+	s.upsertCalled = true
 	if s.upsertErr != nil {
 		return database.Kiosk{}, s.upsertErr
 	}
 	return database.Kiosk{ID: arg.ID, IP: arg.IP, Name: arg.Name}, nil
 }
 
-func (s *stubStore) GetKioskByName(_ context.Context, name string) (database.Kiosk, error) {
-	if s.nameErr != nil {
-		return database.Kiosk{}, s.nameErr
+func (s *stubStore) NameHeldByOther(_ context.Context, ip, name string) (bool, error) {
+	s.nameChecks++
+	if s.held != nil {
+		return s.held(ip, name)
 	}
 	k, ok := s.byName[name]
 	if !ok {
-		return database.Kiosk{}, sql.ErrNoRows
+		return false, nil
 	}
-	return k, nil
+	return k.IP != ip, nil
 }
 
 func (s *stubStore) ListKiosksByIDs(_ context.Context, _ []uuid.UUID) ([]database.Kiosk, error) {
@@ -92,33 +96,6 @@ func (s *stubStore) ListKiosksByIDs(_ context.Context, _ []uuid.UUID) ([]databas
 		return nil, s.listErr
 	}
 	return nil, nil
-}
-
-// uniqueConstraintError returns a real driver-level UNIQUE constraint error
-// (modernc *sqlite.Error, extended code 2067) produced by violating a scratch
-// table, so fake-store tests exercise the real classification gate.
-func uniqueConstraintError(t *testing.T) error {
-	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if _, err := db.Exec("CREATE TABLE t (v text UNIQUE)"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec("INSERT INTO t VALUES ('x')"); err != nil {
-		t.Fatal(err)
-	}
-	_, err = db.Exec("INSERT INTO t VALUES ('x')")
-	if err == nil {
-		t.Fatal("second insert succeeded, want UNIQUE constraint error")
-	}
-	var sqliteErr *sqlite.Error
-	if !errors.As(err, &sqliteErr) {
-		t.Fatalf("error %T is not *sqlite.Error: %v", err, err)
-	}
-	return err
 }
 
 // --- Registration ---
@@ -131,15 +108,15 @@ func TestRegisterNewKiosk(t *testing.T) {
 	if err := m.Register(ctx, "10.0.0.1", "Lobby"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	k, err := m.ResolveIdentity(ctx, "10.0.0.1")
+	k, err := m.GetKioskByIP(ctx, "10.0.0.1")
 	if err != nil {
-		t.Fatalf("ResolveIdentity: %v", err)
+		t.Fatalf("GetKioskByIP: %v", err)
 	}
 	if k.ID == uuid.Nil {
-		t.Error("ResolveIdentity returned a zero ID")
+		t.Error("GetKioskByIP returned a zero ID")
 	}
 	if k.IP != "10.0.0.1" || k.Name != "Lobby" {
-		t.Errorf("ResolveIdentity = {%s %s}, want IP 10.0.0.1 Name Lobby", k.IP, k.Name)
+		t.Errorf("GetKioskByIP = {%s %s}, want IP 10.0.0.1 Name Lobby", k.IP, k.Name)
 	}
 }
 
@@ -151,16 +128,16 @@ func TestRegisterIdempotentKeepsIdentity(t *testing.T) {
 	if err := m.Register(ctx, "10.0.0.1", "Lobby"); err != nil {
 		t.Fatalf("first Register: %v", err)
 	}
-	first, err := m.ResolveIdentity(ctx, "10.0.0.1")
+	first, err := m.GetKioskByIP(ctx, "10.0.0.1")
 	if err != nil {
-		t.Fatalf("ResolveIdentity after first register: %v", err)
+		t.Fatalf("GetKioskByIP after first register: %v", err)
 	}
 	if err := m.Register(ctx, "10.0.0.1", "Lobby"); err != nil {
 		t.Fatalf("second Register: %v", err)
 	}
-	second, err := m.ResolveIdentity(ctx, "10.0.0.1")
+	second, err := m.GetKioskByIP(ctx, "10.0.0.1")
 	if err != nil {
-		t.Fatalf("ResolveIdentity after second register: %v", err)
+		t.Fatalf("GetKioskByIP after second register: %v", err)
 	}
 	if second.ID != first.ID {
 		t.Errorf("identity changed across re-registration: %s -> %s", first.ID, second.ID)
@@ -175,19 +152,19 @@ func TestRegisterSameIPRenames(t *testing.T) {
 	if err := m.Register(ctx, "10.0.0.1", "A"); err != nil {
 		t.Fatalf("Register A: %v", err)
 	}
-	before, err := m.ResolveIdentity(ctx, "10.0.0.1")
+	before, err := m.GetKioskByIP(ctx, "10.0.0.1")
 	if err != nil {
-		t.Fatalf("ResolveIdentity before rename: %v", err)
+		t.Fatalf("GetKioskByIP before rename: %v", err)
 	}
 	if err := m.Register(ctx, "10.0.0.1", "B"); err != nil {
 		t.Fatalf("Register B: %v", err)
 	}
-	after, err := m.ResolveIdentity(ctx, "10.0.0.1")
+	after, err := m.GetKioskByIP(ctx, "10.0.0.1")
 	if err != nil {
-		t.Fatalf("ResolveIdentity after rename: %v", err)
+		t.Fatalf("GetKioskByIP after rename: %v", err)
 	}
 	if after.Name != "B" {
-		t.Errorf("ResolveIdentity.Name = %q, want B", after.Name)
+		t.Errorf("GetKioskByIP.Name = %q, want B", after.Name)
 	}
 	if after.ID != before.ID {
 		t.Errorf("rename changed identity: %s -> %s", before.ID, after.ID)
@@ -196,7 +173,7 @@ func TestRegisterSameIPRenames(t *testing.T) {
 
 func TestRegisterNameTakenByOtherKiosk(t *testing.T) {
 	db := newTestDB(t)
-	m, buf := newTestModule(db)
+	m, buf := newTestModule(dbStore{Queries: db})
 	ctx := context.Background()
 
 	if err := m.Register(ctx, "10.0.0.1", "Lobby"); err != nil {
@@ -208,29 +185,33 @@ func TestRegisterNameTakenByOtherKiosk(t *testing.T) {
 	if strings.Contains(buf.String(), "level=ERROR") {
 		t.Errorf("name conflict was logged as an error: %s", buf.String())
 	}
-	original, err := m.ResolveIdentity(ctx, "10.0.0.1")
+	original, err := m.GetKioskByIP(ctx, "10.0.0.1")
 	if err != nil {
-		t.Fatalf("ResolveIdentity original: %v", err)
+		t.Fatalf("GetKioskByIP original: %v", err)
 	}
 	if original.Name != "Lobby" {
 		t.Errorf("original kiosk name changed to %q", original.Name)
 	}
-	if _, err := m.ResolveIdentity(ctx, "10.0.0.2"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("ResolveIdentity(10.0.0.2) = %v, want ErrNotFound (second kiosk must not be registered)", err)
+	if _, err := m.GetKioskByIP(ctx, "10.0.0.2"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetKioskByIP(10.0.0.2) = %v, want ErrNotFound (second kiosk must not be registered)", err)
 	}
 
-	// DO UPDATE-phase conflict: a registered IP re-registering under a name
-	// held by another kiosk hits the upsert's ON CONFLICT(ip) DO UPDATE path
-	// and must still yield ErrNameTaken, not a silent rename.
+	// Pre-check short-circuit: a registered IP re-registering under a name
+	// held by another kiosk is rejected by the NameHeldByOther pre-check
+	// before any upsert is attempted. The upsert's ON CONFLICT(ip) DO UPDATE
+	// path is only reachable via a race between the pre-check and the write,
+	// which TestRegisterNameTakenByRacingRegister exercises with a fake
+	// store; either way the register must yield ErrNameTaken, not a silent
+	// rename.
 	if err := m.Register(ctx, "10.0.0.2", "Branch2"); err != nil {
 		t.Fatalf("Register Branch2: %v", err)
 	}
 	if err := m.Register(ctx, "10.0.0.2", "Lobby"); !errors.Is(err, ErrNameTaken) {
 		t.Fatalf("Register(10.0.0.2, Lobby) = %v, want ErrNameTaken", err)
 	}
-	kept, err := m.ResolveIdentity(ctx, "10.0.0.2")
+	kept, err := m.GetKioskByIP(ctx, "10.0.0.2")
 	if err != nil {
-		t.Fatalf("ResolveIdentity(10.0.0.2) after conflict: %v", err)
+		t.Fatalf("GetKioskByIP(10.0.0.2) after conflict: %v", err)
 	}
 	if kept.Name != "Branch2" {
 		t.Errorf("10.0.0.2 name changed to %q, want Branch2", kept.Name)
@@ -239,12 +220,12 @@ func TestRegisterNameTakenByOtherKiosk(t *testing.T) {
 
 // --- Identity ---
 
-func TestResolveIdentityUnknownIP(t *testing.T) {
+func TestGetKioskByIPUnknownIP(t *testing.T) {
 	db := newTestDB(t)
 	m := testModule(db)
 
-	if _, err := m.ResolveIdentity(context.Background(), "10.0.0.99"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("ResolveIdentity = %v, want ErrNotFound", err)
+	if _, err := m.GetKioskByIP(context.Background(), "10.0.0.99"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetKioskByIP = %v, want ErrNotFound", err)
 	}
 }
 
@@ -268,9 +249,9 @@ func TestListLiveOrdersByName(t *testing.T) {
 		if err := m.Register(ctx, r.ip, r.name); err != nil {
 			t.Fatalf("Register(%s): %v", r.name, err)
 		}
-		k, err := m.ResolveIdentity(ctx, r.ip)
+		k, err := m.GetKioskByIP(ctx, r.ip)
 		if err != nil {
-			t.Fatalf("ResolveIdentity(%s): %v", r.ip, err)
+			t.Fatalf("GetKioskByIP(%s): %v", r.ip, err)
 		}
 		ids[r.name] = k.ID
 	}
@@ -321,33 +302,27 @@ func TestListLiveEmptySkipsQuery(t *testing.T) {
 	}
 }
 
-func TestRegisterDBFailureLogged(t *testing.T) {
-	// A genuine constraint error followed by a failing name lookup falls
-	// through to the logged wrapped-error path (not ErrNameTaken).
-	s := &stubStore{upsertErr: uniqueConstraintError(t), nameErr: sql.ErrNoRows}
-	m, buf := newTestModule(s)
+func TestRegisterEmptyNameRejectedBeforeStore(t *testing.T) {
+	// The module owns the input contract: an empty or whitespace-only name
+	// is rejected before any store access.
+	s := &stubStore{}
+	m, _ := newTestModule(s)
 
-	err := m.Register(context.Background(), "10.0.0.1", "Lobby")
-	if err == nil {
-		t.Fatal("Register returned nil error, want wrapped error")
+	for _, name := range []string{"", "   ", "\t\n"} {
+		if err := m.Register(context.Background(), "10.0.0.1", name); !errors.Is(err, ErrNameRequired) {
+			t.Fatalf("Register(name=%q) = %v, want ErrNameRequired", name, err)
+		}
 	}
-	if errors.Is(err, ErrNameTaken) {
-		t.Fatalf("Register = %v, want wrapped non-conflict error", err)
-	}
-	if !strings.Contains(buf.String(), "register kiosk") {
-		t.Errorf("log buffer does not contain %q: %s", "register kiosk", buf.String())
-	}
-	if !strings.Contains(buf.String(), "level=ERROR") {
-		t.Errorf("upsert failure was not logged at ERROR level: %s", buf.String())
+	if s.upsertCalled || s.nameChecks != 0 {
+		t.Error("store was accessed before the name check")
 	}
 }
 
-func TestRegisterNameTakenWithConstraintError(t *testing.T) {
-	// A genuine UNIQUE constraint error whose name lookup finds a
-	// different-IP holder is ErrNameTaken — the seam-level twin of
+func TestRegisterNameHeldByOtherKiosk(t *testing.T) {
+	// A name held by a different IP is rejected by the pre-check alone; the
+	// upsert is never attempted. The seam-level twin of
 	// TestRegisterNameTakenByOtherKiosk.
 	s := &stubStore{
-		upsertErr: uniqueConstraintError(t),
 		byName: map[string]database.Kiosk{
 			"Lobby": {ID: uuid.New(), IP: "10.0.0.1", Name: "Lobby"},
 		},
@@ -357,8 +332,66 @@ func TestRegisterNameTakenWithConstraintError(t *testing.T) {
 	if err := m.Register(context.Background(), "10.0.0.2", "Lobby"); !errors.Is(err, ErrNameTaken) {
 		t.Fatalf("Register = %v, want ErrNameTaken", err)
 	}
+	if s.upsertCalled {
+		t.Error("UpsertKiosk was called for a name already held by another kiosk")
+	}
 	if strings.Contains(buf.String(), "level=ERROR") {
 		t.Errorf("name conflict was logged as an error: %s", buf.String())
+	}
+}
+
+func TestRegisterNameTakenByRacingRegister(t *testing.T) {
+	// The name is free at pre-check time, but a racing register claims it
+	// before this upsert lands; the failed upsert is classified as
+	// ErrNameTaken via a second store answer, not a driver error code.
+	s := &stubStore{
+		upsertErr: errors.New("write failed"),
+	}
+	s.held = func(ip, name string) (bool, error) {
+		return s.nameChecks > 1, nil
+	}
+	m, buf := newTestModule(s)
+
+	if err := m.Register(context.Background(), "10.0.0.2", "Lobby"); !errors.Is(err, ErrNameTaken) {
+		t.Fatalf("Register = %v, want ErrNameTaken", err)
+	}
+	if s.nameChecks != 2 {
+		t.Errorf("NameHeldByOther called %d times, want 2 (pre-check + race re-check)", s.nameChecks)
+	}
+	if strings.Contains(buf.String(), "level=ERROR") {
+		t.Errorf("name conflict was logged as an error: %s", buf.String())
+	}
+}
+
+func TestRegisterDBFailureLogged(t *testing.T) {
+	// The upsert fails and the follow-up conflict check also errors; the
+	// failure falls through to the logged wrapped-error path (not ErrNameTaken).
+	s := &stubStore{
+		upsertErr: errors.New("disk I/O error"),
+	}
+	s.held = func(ip, name string) (bool, error) {
+		if s.nameChecks > 1 {
+			return false, errors.New("name lookup failed")
+		}
+		return false, nil
+	}
+	m, buf := newTestModule(s)
+
+	err := m.Register(context.Background(), "10.0.0.1", "Lobby")
+	if err == nil {
+		t.Fatal("Register returned nil error, want wrapped error")
+	}
+	if errors.Is(err, ErrNameTaken) {
+		t.Fatalf("Register = %v, want wrapped non-conflict error", err)
+	}
+	if s.nameChecks != 2 {
+		t.Errorf("NameHeldByOther called %d times, want 2 (pre-check + post-upsert re-check)", s.nameChecks)
+	}
+	if !strings.Contains(buf.String(), "register kiosk") {
+		t.Errorf("log buffer does not contain %q: %s", "register kiosk", buf.String())
+	}
+	if !strings.Contains(buf.String(), "level=ERROR") {
+		t.Errorf("upsert failure was not logged at ERROR level: %s", buf.String())
 	}
 }
 
