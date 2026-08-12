@@ -8,14 +8,16 @@ import (
 	"github.com/google/uuid"
 )
 
-// issuer is the JWT "iss" claim. Validation requires it to match, so tokens
-// minted for one broker deployment cannot be replayed against another.
-const issuer = "docu-kiosk"
+// Issuer is the JWT "iss" claim. Validation requires it to match, so tokens
+// minted for one broker deployment cannot be replayed against another. It is
+// exported so tests that forge tokens (e.g. the empty-key forgery in the
+// server package) reuse the module's constant instead of hardcoding it.
+const Issuer = "docu-kiosk"
 
 func generateJWT(userID uuid.UUID, key []byte, expiresIn time.Duration) (string, error) {
 	now := time.Now().UTC()
 	claims := &jwt.RegisteredClaims{
-		Issuer:    issuer,
+		Issuer:    Issuer,
 		IssuedAt:  jwt.NewNumericDate(now),
 		ExpiresAt: jwt.NewNumericDate(now.Add(expiresIn)),
 		Subject:   userID.String(),
@@ -37,7 +39,7 @@ func validateJWT(tokenString string, key []byte) (uuid.UUID, error) {
 			return key, nil
 		},
 		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
-		jwt.WithIssuer(issuer),
+		jwt.WithIssuer(Issuer),
 		jwt.WithExpirationRequired(),
 	)
 	if err != nil {

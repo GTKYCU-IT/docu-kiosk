@@ -116,7 +116,7 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 		logger.Info("TRUSTED_PROXIES not set — X-Forwarded-For will be ignored, kiosk IPs resolve to the direct peer")
 	}
 
-	authModule, err := auth.NewAuthModule(db, cfg.TokenSecret)
+	authModule, err := auth.NewAuthModule(db, cfg.TokenSecret, auth.TokenLifetimes{JWTTTL: cfg.JWTTTL, RefreshTTL: cfg.RefreshTTL})
 	if err != nil {
 		return nil, fmt.Errorf("init auth: %w", err)
 	}
@@ -129,7 +129,7 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 		// The CORS policy is enforced inside the hub as well as by the
 		// middleware, via the same allowsRequest predicate, so the origin
 		// gate holds even if the hub is ever used without the middleware.
-		hub: hub.New(kioskModule, logger, hub.WithOriginPolicy(corsCfg.allowsRequest)),
+		hub:            hub.New(kioskModule, logger, hub.WithOriginPolicy(corsCfg.allowsRequest)),
 		authModule:     authModule,
 		port:           cfg.Port,
 		logger:         logger,

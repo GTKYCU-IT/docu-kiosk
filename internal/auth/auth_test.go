@@ -9,11 +9,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/calvertjadon/docu-kiosk/internal/config"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/google/uuid"
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
+
+// testLifetimes bundles the config token-lifetime defaults for constructor
+// call sites, so tests exercise the same policy as production.
+var testLifetimes = TokenLifetimes{JWTTTL: config.DefaultJWTTTL, RefreshTTL: config.DefaultRefreshTTL}
 
 func newTestDB(t *testing.T) (*sql.DB, *database.Queries) {
 	t.Helper()
@@ -37,14 +42,14 @@ func newTestDB(t *testing.T) (*sql.DB, *database.Queries) {
 	return db, database.New(db)
 }
 
-func newTestModule(t *testing.T) (*AuthModule, *sql.DB) {
+func newTestModule(t *testing.T) (*AuthModule, *database.Queries, *sql.DB) {
 	t.Helper()
 	db, queries := newTestDB(t)
-	module, err := NewAuthModule(queries, []byte(testSecret))
+	module, err := NewAuthModule(queries, []byte(testSecret), testLifetimes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return module, db
+	return module, queries, db
 }
 
 func createTestUser(t *testing.T, queries *database.Queries, username, password string) {
@@ -64,14 +69,14 @@ func createTestUser(t *testing.T, queries *database.Queries, username, password 
 
 func TestNewAuthModuleRejectsShortKey(t *testing.T) {
 	_, queries := newTestDB(t)
-	if _, err := NewAuthModule(queries, []byte("short")); err == nil {
+	if _, err := NewAuthModule(queries, []byte("short"), testLifetimes); err == nil {
 		t.Error("expected error for short jwt key")
 	}
 }
 
 func TestLoginSuccess(t *testing.T) {
-	module, _ := newTestModule(t)
-	createTestUser(t, module.db, "admin", "correct horse")
+	module, queries, _ := newTestModule(t)
+	createTestUser(t, queries, "admin", "correct horse")
 
 	jwt, refresh, err := module.Login(context.Background(), "admin", "correct horse")
 	if err != nil {
@@ -91,8 +96,8 @@ func TestLoginSuccess(t *testing.T) {
 }
 
 func TestLoginWrongPassword(t *testing.T) {
-	module, _ := newTestModule(t)
-	createTestUser(t, module.db, "admin", "correct horse")
+	module, queries, _ := newTestModule(t)
+	createTestUser(t, queries, "admin", "correct horse")
 
 	if _, _, err := module.Login(context.Background(), "admin", "wrong horse"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Errorf("expected ErrInvalidCredentials, got %v", err)
@@ -100,7 +105,7 @@ func TestLoginWrongPassword(t *testing.T) {
 }
 
 func TestLoginUnknownUser(t *testing.T) {
-	module, _ := newTestModule(t)
+	module, _, _ := newTestModule(t)
 
 	if _, _, err := module.Login(context.Background(), "nobody", "whatever"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Errorf("expected ErrInvalidCredentials, got %v", err)
@@ -108,8 +113,8 @@ func TestLoginUnknownUser(t *testing.T) {
 }
 
 func TestRotateRefresh(t *testing.T) {
-	module, _ := newTestModule(t)
-	createTestUser(t, module.db, "admin", "correct horse")
+	module, queries, _ := newTestModule(t)
+	createTestUser(t, queries, "admin", "correct horse")
 
 	_, oldRefresh, err := module.Login(context.Background(), "admin", "correct horse")
 	if err != nil {
@@ -129,8 +134,8 @@ func TestRotateRefresh(t *testing.T) {
 }
 
 func TestRotateRefreshRejectsRevoked(t *testing.T) {
-	module, _ := newTestModule(t)
-	createTestUser(t, module.db, "admin", "correct horse")
+	module, queries, _ := newTestModule(t)
+	createTestUser(t, queries, "admin", "correct horse")
 
 	_, oldRefresh, err := module.Login(context.Background(), "admin", "correct horse")
 	if err != nil {
@@ -147,7 +152,7 @@ func TestRotateRefreshRejectsRevoked(t *testing.T) {
 }
 
 func TestRotateRefreshRejectsUnknownToken(t *testing.T) {
-	module, _ := newTestModule(t)
+	module, _, _ := newTestModule(t)
 
 	if _, _, err := module.RotateRefresh(context.Background(), "not-a-real-token"); !errors.Is(err, ErrInvalidRefreshToken) {
 		t.Errorf("expected ErrInvalidRefreshToken, got %v", err)
@@ -155,8 +160,8 @@ func TestRotateRefreshRejectsUnknownToken(t *testing.T) {
 }
 
 func TestRotateRefreshRejectsExpired(t *testing.T) {
-	module, db := newTestModule(t)
-	createTestUser(t, module.db, "admin", "correct horse")
+	module, queries, db := newTestModule(t)
+	createTestUser(t, queries, "admin", "correct horse")
 
 	_, oldRefresh, err := module.Login(context.Background(), "admin", "correct horse")
 	if err != nil {
@@ -174,8 +179,8 @@ func TestRotateRefreshRejectsExpired(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
-	module, _ := newTestModule(t)
-	createTestUser(t, module.db, "admin", "correct horse")
+	module, queries, _ := newTestModule(t)
+	createTestUser(t, queries, "admin", "correct horse")
 
 	jwt, _, err := module.Login(context.Background(), "admin", "correct horse")
 	if err != nil {
@@ -192,8 +197,8 @@ func TestValidate(t *testing.T) {
 }
 
 func TestValidateRejectsForgedToken(t *testing.T) {
-	module, _ := newTestModule(t)
-	createTestUser(t, module.db, "admin", "correct horse")
+	module, queries, _ := newTestModule(t)
+	createTestUser(t, queries, "admin", "correct horse")
 
 	// A token signed with a different key (e.g. an empty one) must not validate.
 	forged, err := generateJWT(uuid.New(), []byte("another-key-0123456789abcdef"), time.Minute)
@@ -203,5 +208,88 @@ func TestValidateRejectsForgedToken(t *testing.T) {
 
 	if _, err := module.Validate(context.Background(), forged); err == nil {
 		t.Error("token signed with a different key should fail validation")
+	}
+}
+
+// fakeStore is a scriptable store for AuthModule tests. Every store method is
+// implemented explicitly — no nil interface promotion — so a test reaches a
+// method only by stubbing it. The seam methods (GetUserByUsername,
+// GetRefreshToken, MakeRefreshToken, RevokeRefreshToken) carry scripted
+// results per scenario; GetUser fails loudly and intentionally, so any test
+// that drives it must replace the stub.
+type fakeStore struct {
+	userByUsername      database.User
+	userByUsernameErr   error
+	refreshToken        database.RefreshToken
+	refreshTokenErr     error
+	makeRefreshToken    database.RefreshToken
+	makeRefreshTokenErr error
+	revokeErr           error
+}
+
+func (f *fakeStore) GetUser(_ context.Context, _ uuid.UUID) (database.User, error) {
+	return database.User{}, errors.New("get user: not stubbed")
+}
+
+func (f *fakeStore) GetUserByUsername(_ context.Context, _ string) (database.User, error) {
+	return f.userByUsername, f.userByUsernameErr
+}
+
+func (f *fakeStore) GetRefreshToken(_ context.Context, _ string) (database.RefreshToken, error) {
+	return f.refreshToken, f.refreshTokenErr
+}
+
+func (f *fakeStore) MakeRefreshToken(_ context.Context, _ database.MakeRefreshTokenParams) (database.RefreshToken, error) {
+	return f.makeRefreshToken, f.makeRefreshTokenErr
+}
+
+func (f *fakeStore) RevokeRefreshToken(_ context.Context, _ string) error {
+	return f.revokeErr
+}
+
+// newFakeModule builds an AuthModule around a fake store, proving the seam
+// (not the concrete *database.Queries) carries the operations.
+func newFakeModule(s store) *AuthModule {
+	return newAuthModule(s, []byte(testSecret), testLifetimes)
+}
+
+// A store failure while looking up the user must map to
+// ErrInvalidCredentials — identical to an unknown user, so the login
+// response cannot be used to probe the database.
+func TestLoginStoreLookupFailureMapsToInvalidCredentials(t *testing.T) {
+	storeErr := errors.New("database unavailable")
+	module := newFakeModule(&fakeStore{userByUsernameErr: storeErr})
+
+	if _, _, err := module.Login(context.Background(), "admin", "whatever"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Errorf("expected ErrInvalidCredentials, got %v", err)
+	}
+}
+
+// A store failure while persisting the refresh token must surface as a
+// wrapped non-credentials error (the handler maps it to 500), not a panic.
+func TestLoginRefreshTokenStoreFailureIsWrapped(t *testing.T) {
+	hash, err := HashPassword("correct horse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeErr := errors.New("disk full")
+	module := newFakeModule(&fakeStore{
+		userByUsername:      database.User{ID: uuid.New(), Username: "admin", Password: hash},
+		makeRefreshTokenErr: storeErr,
+	})
+
+	if _, _, err := module.Login(context.Background(), "admin", "correct horse"); !errors.Is(err, storeErr) {
+		t.Errorf("expected wrapped store error, got %v", err)
+	}
+}
+
+// A store failure while reading the refresh token must map to
+// ErrInvalidRefreshToken, the same response a revoked or unknown token gets.
+func TestRotateRefreshStoreLookupFailureMapsToInvalidToken(t *testing.T) {
+	storeErr := errors.New("database unavailable")
+	module := newFakeModule(&fakeStore{refreshTokenErr: storeErr})
+
+	if _, _, err := module.RotateRefresh(context.Background(), "some-token"); !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("expected ErrInvalidRefreshToken, got %v", err)
 	}
 }

@@ -35,6 +35,8 @@ func testConfig() config.Config {
 		AdminUsername: "admin",
 		AdminPassword: "admin1234",
 		LogLevel:      slog.LevelInfo,
+		JWTTTL:        config.DefaultJWTTTL,
+		RefreshTTL:    config.DefaultRefreshTTL,
 	}
 }
 
