@@ -10,7 +10,7 @@ INSERT INTO refresh_tokens (
     datetime('now'),
     datetime('now'),
     ?,
-    datetime('now', '+60 days')
+    ?
 )
 RETURNING *;
 

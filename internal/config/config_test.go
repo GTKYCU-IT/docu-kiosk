@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // validSecret satisfies Load's DOCU_KIOSK_TOKEN_SECRET minimum (32 bytes);
@@ -21,6 +22,7 @@ func setEnv(t *testing.T, overrides map[string]string) {
 		"PORT": "", "DOCU_KIOSK_TOKEN_SECRET": validSecret,
 		"AUTH_USERNAME": "", "AUTH_PASSWORD": "",
 		"LOG_LEVEL": "", "CORS_ORIGINS": "", "TRUSTED_PROXIES": "",
+		"DOCU_KIOSK_JWT_TTL": "", "DOCU_KIOSK_REFRESH_TTL": "",
 	} {
 		t.Setenv(k, v)
 	}
@@ -98,6 +100,57 @@ func TestLoadSecretPasses(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultTokenTTLs(t *testing.T) {
+	setEnv(t, map[string]string{})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.JWTTTL != 15*time.Second {
+		t.Errorf("JWTTTL = %v, want 15s", cfg.JWTTTL)
+	}
+	if cfg.RefreshTTL != 60*24*time.Hour {
+		t.Errorf("RefreshTTL = %v, want 60 days", cfg.RefreshTTL)
+	}
+}
+
+func TestLoadCustomTokenTTLs(t *testing.T) {
+	setEnv(t, map[string]string{"DOCU_KIOSK_JWT_TTL": "1m", "DOCU_KIOSK_REFRESH_TTL": "24h"})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.JWTTTL != time.Minute {
+		t.Errorf("JWTTTL = %v, want 1m", cfg.JWTTTL)
+	}
+	if cfg.RefreshTTL != 24*time.Hour {
+		t.Errorf("RefreshTTL = %v, want 24h", cfg.RefreshTTL)
+	}
+}
+
+func TestLoadInvalidTokenTTLs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		varName string
+		raw     string
+	}{
+		{"jwt not a duration", "DOCU_KIOSK_JWT_TTL", "banana"},
+		{"jwt negative", "DOCU_KIOSK_JWT_TTL", "-15s"},
+		{"jwt zero", "DOCU_KIOSK_JWT_TTL", "0s"},
+		{"refresh not a duration", "DOCU_KIOSK_REFRESH_TTL", "banana"},
+		{"refresh negative", "DOCU_KIOSK_REFRESH_TTL", "-24h"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnv(t, map[string]string{tc.varName: tc.raw})
+
+			_, err := Load()
+			wantErrMentions(t, err, tc.varName)
+		})
+	}
+}
+
 func TestLoadDefaultLogLevel(t *testing.T) {
 	setEnv(t, map[string]string{})
 
@@ -159,12 +212,14 @@ func TestLoadNumericLogLevelRejected(t *testing.T) {
 
 func TestLoadAllVars(t *testing.T) {
 	setEnv(t, map[string]string{
-		"PORT":            "8443",
-		"AUTH_USERNAME":   "admin",
-		"AUTH_PASSWORD":   "admin1234",
-		"LOG_LEVEL":       "warn",
-		"CORS_ORIGINS":    "https://admin.example.com, chrome-extension://abc",
-		"TRUSTED_PROXIES": "10.0.0.0/8, 127.0.0.1",
+		"PORT":                   "8443",
+		"AUTH_USERNAME":          "admin",
+		"AUTH_PASSWORD":          "admin1234",
+		"LOG_LEVEL":              "warn",
+		"CORS_ORIGINS":           "https://admin.example.com, chrome-extension://abc",
+		"TRUSTED_PROXIES":        "10.0.0.0/8, 127.0.0.1",
+		"DOCU_KIOSK_JWT_TTL":     "2m",
+		"DOCU_KIOSK_REFRESH_TTL": "48h",
 	})
 
 	cfg, err := Load()
@@ -196,6 +251,12 @@ func TestLoadAllVars(t *testing.T) {
 	}
 	if !slices.Equal(cfg.TrustedProxies, want) {
 		t.Errorf("TrustedProxies = %v, want %v", cfg.TrustedProxies, want)
+	}
+	if cfg.JWTTTL != 2*time.Minute {
+		t.Errorf("JWTTTL = %v, want 2m", cfg.JWTTTL)
+	}
+	if cfg.RefreshTTL != 48*time.Hour {
+		t.Errorf("RefreshTTL = %v, want 48h", cfg.RefreshTTL)
 	}
 }
 

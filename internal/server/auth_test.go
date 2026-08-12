@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/calvertjadon/docu-kiosk/internal/auth"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 )
@@ -18,7 +19,7 @@ import (
 // key (jwtKey was never configured): such tokens must now be rejected.
 func emptyKeyToken() string {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-		Issuer:    "docu-kiosk",
+		Issuer:    auth.Issuer,
 		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
 		Subject:   uuid.New().String(),
 	})

@@ -117,7 +117,7 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 		logger.Info("TRUSTED_PROXIES not set — X-Forwarded-For will be ignored, kiosk IPs resolve to the direct peer")
 	}
 
-	authModule, err := auth.NewAuthModule(db, cfg.TokenSecret)
+	authModule, err := auth.NewAuthModule(db, cfg.TokenSecret, cfg.JWTTTL, cfg.RefreshTTL)
 	if err != nil {
 		return nil, fmt.Errorf("init auth: %w", err)
 	}

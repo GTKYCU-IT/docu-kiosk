@@ -15,11 +15,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds every broker setting. CORSOrigins is the normalized CORS
 // allowlist (nil/empty means unconfigured — the server applies its default);
-// TrustedProxies is parsed here so malformed entries fail startup.
+// TrustedProxies is parsed here so malformed entries fail startup. JWTTTL and
+// RefreshTTL are the broker's one policy location for token lifetimes.
 type Config struct {
 	Port           int    // default 8080
 	TokenSecret    []byte // DOCU_KIOSK_TOKEN_SECRET
@@ -28,7 +30,16 @@ type Config struct {
 	LogLevel       slog.Level
 	CORSOrigins    []string       // normalized allowlist from CORS_ORIGINS; nil/empty means the server applies its default allowlist
 	TrustedProxies []netip.Prefix // parsed from TRUSTED_PROXIES; nil when unset
+	JWTTTL         time.Duration  // DOCU_KIOSK_JWT_TTL (default 15s)
+	RefreshTTL     time.Duration  // DOCU_KIOSK_REFRESH_TTL (default 60 days)
 }
+
+// Token-lifetime defaults. These are the only place token lifetimes are
+// decided; AuthModule receives them as parameters.
+const (
+	defaultJWTTTL     = 15 * time.Second
+	defaultRefreshTTL = 60 * 24 * time.Hour
+)
 
 // Load reads every broker environment variable exactly once, failing fast
 // on invalid values so the broker never starts in a misconfigured state.
@@ -80,6 +91,26 @@ func Load() (Config, error) {
 		}
 	}
 
+	if raw := os.Getenv("DOCU_KIOSK_JWT_TTL"); raw == "" {
+		cfg.JWTTTL = defaultJWTTTL
+	} else {
+		ttl, err := parseDurationEnv(raw, "DOCU_KIOSK_JWT_TTL")
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.JWTTTL = ttl
+	}
+
+	if raw := os.Getenv("DOCU_KIOSK_REFRESH_TTL"); raw == "" {
+		cfg.RefreshTTL = defaultRefreshTTL
+	} else {
+		ttl, err := parseDurationEnv(raw, "DOCU_KIOSK_REFRESH_TTL")
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.RefreshTTL = ttl
+	}
+
 	var err error
 	cfg.CORSOrigins, err = parseCORSOrigins(os.Getenv("CORS_ORIGINS"))
 	if err != nil {
@@ -92,6 +123,20 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// parseDurationEnv parses a token-lifetime env var as a Go duration (e.g.
+// "15s", "720h"). Empty values are handled by the caller (they mean "use the
+// default"); anything unparsable or non-positive fails startup.
+func parseDurationEnv(raw, name string) (time.Duration, error) {
+	ttl, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: must be a duration like 15s or 720h", name, raw)
+	}
+	if ttl <= 0 {
+		return 0, fmt.Errorf("invalid %s %q: must be positive", name, raw)
+	}
+	return ttl, nil
 }
 
 // ParseTrustedProxies parses the TRUSTED_PROXIES value into a list of
