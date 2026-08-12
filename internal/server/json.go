@@ -10,11 +10,11 @@ import (
 // response body, so internal state is not leaked to callers.
 func (s *server) respondWithError(w http.ResponseWriter, msg string, code int, err error) {
 	if code >= 500 {
+		args := []any{"code", code, "message", msg}
 		if err != nil {
-			s.logger.Error("request failed", "code", code, "message", msg, "error", err)
-		} else {
-			s.logger.Error("request failed", "code", code, "message", msg)
+			args = append(args, "error", err)
 		}
+		s.logger.Error("request failed", args...)
 	} else {
 		s.logger.Debug("request rejected", "code", code, "message", msg)
 	}

@@ -169,7 +169,7 @@ func TestRegisterSameIPRenames(t *testing.T) {
 
 func TestRegisterNameTakenByOtherKiosk(t *testing.T) {
 	db := newTestDB(t)
-	m := testModule(db)
+	m, buf := newTestModule(db)
 	ctx := context.Background()
 
 	if err := m.Register(ctx, "10.0.0.1", "Lobby"); err != nil {
@@ -177,6 +177,9 @@ func TestRegisterNameTakenByOtherKiosk(t *testing.T) {
 	}
 	if err := m.Register(ctx, "10.0.0.2", "Lobby"); !errors.Is(err, ErrNameTaken) {
 		t.Fatalf("Register = %v, want ErrNameTaken", err)
+	}
+	if strings.Contains(buf.String(), "level=ERROR") {
+		t.Errorf("name conflict was logged as an error: %s", buf.String())
 	}
 	original, err := m.ResolveIdentity(ctx, "10.0.0.1")
 	if err != nil {
@@ -287,9 +290,9 @@ func TestRegisterDBFailureLogged(t *testing.T) {
 	}
 }
 
-func TestRegisterNameTakenNotLoggedAsError(t *testing.T) {
+func TestRegisterUpsertFailureIsNotNameConflict(t *testing.T) {
 	s := &stubStore{
-		upsertErr: errors.New("unique constraint violation"),
+		upsertErr: errors.New("disk I/O error"),
 		byName: map[string]database.Kiosk{
 			"Lobby": {ID: uuid.New(), IP: "10.0.0.1", Name: "Lobby"},
 		},
@@ -297,10 +300,16 @@ func TestRegisterNameTakenNotLoggedAsError(t *testing.T) {
 	m, buf := newTestModule(s)
 
 	err := m.Register(context.Background(), "10.0.0.2", "Lobby")
-	if !errors.Is(err, ErrNameTaken) {
-		t.Fatalf("Register = %v, want ErrNameTaken", err)
+	if err == nil {
+		t.Fatal("Register returned nil error, want wrapped error")
 	}
-	if strings.Contains(buf.String(), "level=ERROR") {
-		t.Errorf("name conflict was logged as an error: %s", buf.String())
+	if errors.Is(err, ErrNameTaken) {
+		t.Fatalf("Register = %v, want wrapped non-conflict error", err)
+	}
+	if !strings.Contains(buf.String(), "register kiosk") {
+		t.Errorf("log buffer does not contain %q: %s", "register kiosk", buf.String())
+	}
+	if !strings.Contains(buf.String(), "level=ERROR") {
+		t.Errorf("upsert failure was not logged at ERROR level: %s", buf.String())
 	}
 }

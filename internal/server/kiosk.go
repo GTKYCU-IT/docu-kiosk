@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
@@ -55,12 +54,12 @@ func (s *server) handleListKiosks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	kiosks := make([]KioskResponse, 0, len(ks))
+	list := make([]KioskResponse, 0, len(ks))
 	for _, k := range ks {
-		kiosks = append(kiosks, KioskResponse{ID: k.ID, Name: k.Name})
+		list = append(list, KioskResponse{ID: k.ID, Name: k.Name})
 	}
 
-	s.respondWithJSON(w, http.StatusOK, kiosks)
+	s.respondWithJSON(w, http.StatusOK, list)
 }
 
 // kioskStore adapts the kiosk module to the hub auth seam.
@@ -72,7 +71,7 @@ func (ks kioskStore) GetKioskByIP(ctx context.Context, ip string) (hub.Kiosk, er
 		if errors.Is(err, kiosks.ErrNotFound) {
 			return hub.Kiosk{}, hub.ErrKioskNotFound
 		}
-		return hub.Kiosk{}, fmt.Errorf("resolve kiosk identity: %w", err)
+		return hub.Kiosk{}, err
 	}
 	return hub.Kiosk{ID: k.ID, Name: k.Name}, nil
 }

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -253,6 +254,55 @@ func TestRegisterSameIPRenames(t *testing.T) {
 	}
 	if kiosks[0].Name != "B" {
 		t.Errorf("expected name B, got %s", kiosks[0].Name)
+	}
+}
+
+func TestRegisterNameConflictDifferentIP(t *testing.T) {
+	db := newTestDB(t)
+	cfg := testConfig()
+	cfg.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}
+	s, err := NewServer(cfg, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.httpServer.Handler)
+	t.Cleanup(ts.Close)
+
+	registerKiosk(t, ts, "Lobby")
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/kiosks",
+		strings.NewReader(`{"name":"Lobby"}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-Forwarded-For", "10.0.0.2")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", res.StatusCode)
+	}
+
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatalf("decode body %q: %v", data, err)
+	}
+	if body.Error != "kiosk name already in use" {
+		t.Errorf("body error = %q, want %q", body.Error, "kiosk name already in use")
+	}
+	for _, leak := range []string{"sqlite", "constraint"} {
+		if strings.Contains(string(data), leak) {
+			t.Errorf("body leaks internal detail %q: %s", leak, data)
+		}
 	}
 }
 

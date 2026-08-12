@@ -11,6 +11,8 @@ import (
 
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/google/uuid"
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // ErrNameTaken is returned by Register when the name is held by a different kiosk.
@@ -56,18 +58,24 @@ func newModule(s store, logger *slog.Logger) *Module {
 // Register upserts a kiosk under ip with a fresh identity, renaming the
 // kiosk when ip is already registered under a different name. It returns
 // ErrNameTaken when name is held by a different kiosk; same-IP renames hit
-// the upsert's ON CONFLICT clause and never error.
+// the upsert's ON CONFLICT clause and never error. On success the stored
+// identity returned by the upsert is logged under "kiosk registered".
 func (m *Module) Register(ctx context.Context, ip, name string) error {
 	id := uuid.New()
-	if _, err := m.store.UpsertKiosk(ctx, database.UpsertKioskParams{ID: id, IP: ip, Name: name}); err != nil {
-		existing, lookupErr := m.store.GetKioskByName(ctx, name)
-		if lookupErr == nil && existing.IP != ip {
-			return ErrNameTaken
+	row, err := m.store.UpsertKiosk(ctx, database.UpsertKioskParams{ID: id, IP: ip, Name: name})
+	if err != nil {
+		var sqliteErr *sqlite.Error
+		if errors.As(err, &sqliteErr) &&
+			(sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT || sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE) {
+			existing, lookupErr := m.store.GetKioskByName(ctx, name)
+			if lookupErr == nil && existing.IP != ip {
+				return ErrNameTaken
+			}
 		}
 		m.logger.Error("register kiosk", "error", err, "name", name, "ip", ip)
 		return fmt.Errorf("register kiosk: %w", err)
 	}
-	m.logger.Info("kiosk registered", "kiosk_id", id, "name", name, "ip", ip)
+	m.logger.Info("kiosk registered", "kiosk_id", row.ID, "name", row.Name, "ip", row.IP)
 	return nil
 }
 
