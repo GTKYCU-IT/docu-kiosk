@@ -122,10 +122,14 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 	}
 
 	kioskModule := kiosks.New(db, logger)
+	corsCfg := newCORSConfig(cfg.CORSOrigins, logger)
 	s := &server{
-		db:             db,
-		kiosks:         kioskModule,
-		hub:            hub.New(kioskModule, logger),
+		db:     db,
+		kiosks: kioskModule,
+		// The CORS policy is enforced inside the hub as well as by the
+		// middleware, via the same allowsRequest predicate, so the origin
+		// gate holds even if the hub is ever used without the middleware.
+		hub: hub.New(kioskModule, logger, hub.WithOriginPolicy(corsCfg.allowsRequest)),
 		authModule:     authModule,
 		port:           cfg.Port,
 		logger:         logger,
@@ -160,7 +164,7 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 
 	s.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
-		Handler: newCORSConfig(cfg.CORSOrigins, logger).middleware(s.loggingMiddleware(mux)),
+		Handler: corsCfg.middleware(s.loggingMiddleware(mux)),
 	}
 
 	return s, nil
@@ -181,22 +185,14 @@ func (s *server) loggingMiddleware(next http.Handler) http.Handler {
 }
 
 type corsConfig struct {
-	allowedOrigins []string // full origins matched exactly, except "chrome-extension://" which is a prefix
+	allowedOrigins []string // full origins matched exactly; scheme-only entries (the config default) are prefix matches
 	logger         *slog.Logger
 }
 
-// newCORSConfig builds the CORS allowlist from the normalized origins parsed
-// by config.Load. An empty allowlist means CORS_ORIGINS was not configured,
-// so the default applies: any Chrome extension — the extension ID varies per
-// build.
+// newCORSConfig builds the CORS allowlist from the origins parsed by
+// config.Load, which owns the policy and applies its default when CORS_ORIGINS
+// is unset. The server never substitutes a default of its own.
 func newCORSConfig(origins []string, logger *slog.Logger) *corsConfig {
-	if len(origins) == 0 {
-		// Default: any Chrome extension — the extension ID varies per build.
-		return &corsConfig{
-			allowedOrigins: []string{"chrome-extension://"},
-			logger:         logger,
-		}
-	}
 	return &corsConfig{allowedOrigins: origins, logger: logger}
 }
 
@@ -219,7 +215,9 @@ func (c *corsConfig) isAllowed(origin string, r *http.Request) bool {
 		return true
 	}
 	for _, allowed := range c.allowedOrigins {
-		if allowed == "chrome-extension://" {
+		if strings.HasSuffix(allowed, "://") {
+			// Scheme-only entry (the config default): any origin with that
+			// scheme is allowed.
 			if strings.HasPrefix(origin, allowed) {
 				return true
 			}
@@ -230,19 +228,27 @@ func (c *corsConfig) isAllowed(origin string, r *http.Request) bool {
 	return false
 }
 
+// allowsRequest is the single origin-admission predicate shared by the CORS
+// middleware and the hub's injected origin policy. A request passes when it
+// has no Origin header (same-origin navigation or a non-browser client —
+// there is nothing for CORS to gate), or when the Origin is same-origin or
+// listed in the allowlist.
+func (c *corsConfig) allowsRequest(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	return origin == "" || c.isAllowed(origin, r)
+}
+
 func (c *corsConfig) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
-			// No Origin header — same-origin navigation or a non-browser
-			// client; there is nothing for CORS to gate.
 			next.ServeHTTP(w, r)
 			return
 		}
 
 		w.Header().Set("Vary", "Origin")
 
-		if !c.isAllowed(origin, r) {
+		if !c.allowsRequest(r) {
 			// Fail closed: no Access-Control-Allow-Origin, so the browser
 			// blocks the response. Browsers always send Origin on WebSocket
 			// handshakes, so an unlisted origin is rejected here before the

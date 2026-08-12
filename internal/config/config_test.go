@@ -226,15 +226,20 @@ func TestLoadCORSGarbageInvalid(t *testing.T) {
 	wantErrMentions(t, err, "CORS_ORIGINS")
 }
 
-func TestLoadCORSEmpty(t *testing.T) {
+// TestLoadCORSUnsetUsesDefaultAllowlist pins the one-module ownership
+// contract: when CORS_ORIGINS is unset, Load applies the default allowlist,
+// so the effective policy is decided in the config module alone. The default
+// is deliberately permissive — fail-closed is the hub's nil-policy
+// rejection, not this default's behavior.
+func TestLoadCORSUnsetUsesDefaultAllowlist(t *testing.T) {
 	setEnv(t, map[string]string{})
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if len(cfg.CORSOrigins) != 0 {
-		t.Errorf("CORSOrigins = %v, want empty", cfg.CORSOrigins)
+	if !slices.Equal(cfg.CORSOrigins, DefaultCORSOrigins()) {
+		t.Errorf("CORSOrigins = %v, want default %v", cfg.CORSOrigins, DefaultCORSOrigins())
 	}
 }
 
