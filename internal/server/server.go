@@ -127,14 +127,9 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 		db:     db,
 		kiosks: kioskModule,
 		// The CORS policy is enforced inside the hub as well as by the
-		// middleware, so the origin gate holds even if the hub is ever used
-		// without the middleware. A missing Origin means a non-browser
-		// client, which the middleware also passes through — there is
-		// nothing to gate.
-		hub: hub.New(kioskModule, logger, hub.WithOriginPolicy(func(r *http.Request) bool {
-			origin := r.Header.Get("Origin")
-			return origin == "" || corsCfg.isAllowed(origin, r)
-		})),
+		// middleware, via the same allowsRequest predicate, so the origin
+		// gate holds even if the hub is ever used without the middleware.
+		hub: hub.New(kioskModule, logger, hub.WithOriginPolicy(corsCfg.allowsRequest)),
 		authModule:     authModule,
 		port:           cfg.Port,
 		logger:         logger,
@@ -233,19 +228,27 @@ func (c *corsConfig) isAllowed(origin string, r *http.Request) bool {
 	return false
 }
 
+// allowsRequest is the single origin-admission predicate shared by the CORS
+// middleware and the hub's injected origin policy. A request passes when it
+// has no Origin header (same-origin navigation or a non-browser client —
+// there is nothing for CORS to gate), or when the Origin is same-origin or
+// listed in the allowlist.
+func (c *corsConfig) allowsRequest(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	return origin == "" || c.isAllowed(origin, r)
+}
+
 func (c *corsConfig) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
-			// No Origin header — same-origin navigation or a non-browser
-			// client; there is nothing for CORS to gate.
 			next.ServeHTTP(w, r)
 			return
 		}
 
 		w.Header().Set("Vary", "Origin")
 
-		if !c.isAllowed(origin, r) {
+		if !c.allowsRequest(r) {
 			// Fail closed: no Access-Control-Allow-Origin, so the browser
 			// blocks the response. Browsers always send Origin on WebSocket
 			// handshakes, so an unlisted origin is rejected here before the

@@ -137,9 +137,11 @@ func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, kioskIP string) {
 
 	// InsecureSkipVerify is safe here because the origin policy above is the
 	// gate: it runs before Accept and has already rejected every origin the
-	// module does not trust. Skipping Accept's (duplicate) origin verification
-	// is what lets the Vite dev proxy rewrite the Origin host during
-	// development without weakening the module's own check.
+	// module does not trust. Accept performs no origin verification of its
+	// own once the flag is set, so the injected policy is not a duplicate of
+	// Accept's check but the replacement for it — the thing that makes
+	// InsecureSkipVerify safe — and skipping Accept's check is what lets the
+	// Vite dev proxy rewrite the Origin host during development.
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	})

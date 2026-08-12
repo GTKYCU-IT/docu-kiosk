@@ -92,7 +92,7 @@ func TestCORSMiddleware(t *testing.T) {
 			// origins mirrors the default config.Load supplies; the
 			// middleware itself no longer applies a default.
 			name:       "chrome extension origin allowed by default allowlist",
-			origins:    slices.Clone(config.DefaultCORSOrigins),
+			origins:    config.DefaultCORSOrigins(),
 			origin:     "chrome-extension://ndmpfjhihnpgakamhhdcpjemakdgmkcp",
 			host:       "kiosk.local:8080",
 			method:     http.MethodGet,
@@ -280,6 +280,27 @@ func TestWSHubGateAllowsSameOrigin(t *testing.T) {
 	s, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	req.Header.Set("Origin", "http://"+req.Host)
+	rec := httptest.NewRecorder()
+	s.hub.Serve(rec, req, "10.0.0.99")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("hub gate status = %d, want 401 from the auth step", rec.Code)
+	}
+}
+
+// TestWSHubGateAllowsAllowlistedOrigin proves the hub gate also admits an
+// origin on the configured allowlist (here the config default, which any
+// Chrome extension matches): Serve is called directly with the allowlisted
+// Origin and the request proceeds to the normal Serve flow, where auth
+// rejects the unknown IP — the gate itself passed.
+func TestWSHubGateAllowsAllowlistedOrigin(t *testing.T) {
+	cfg := testConfig()
+	cfg.CORSOrigins = config.DefaultCORSOrigins()
+	s, err := NewServer(cfg, newTestDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Origin", "chrome-extension://abc")
 	rec := httptest.NewRecorder()
 	s.hub.Serve(rec, req, "10.0.0.99")
 	if rec.Code != http.StatusUnauthorized {

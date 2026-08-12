@@ -233,40 +233,38 @@ func TestServeAuthLookupErrorIsServerError(t *testing.T) {
 	}
 }
 
-// TestServeWithoutOriginPolicyRejects pins the fail-closed default: a Hub
-// with no injected policy must refuse every connection before anything else
-// happens, even one that would otherwise authenticate.
-func TestServeWithoutOriginPolicyRejects(t *testing.T) {
-	buf := &syncBuffer{}
-	logger := slog.New(slog.NewTextHandler(buf, nil))
-	h := New(newFakeStore(nil), logger)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
-	h.Serve(rec, req, "10.0.0.99")
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected 403, got %d", rec.Code)
+// TestServeOriginPolicyRejects pins the fail-closed default: a Hub refuses
+// every connection with 403 before the store lookup or accept — whether no
+// policy was injected at all (nil) or the injected policy returned false —
+// even one that would otherwise authenticate.
+func TestServeOriginPolicyRejects(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy OriginPolicy
+	}{
+		{name: "no policy injected"},
+		{name: "policy returns false", policy: func(r *http.Request) bool { return false }},
 	}
-	if rec.Body.String() != "origin rejected\n" {
-		t.Errorf("expected body %q, got %q", "origin rejected\n", rec.Body.String())
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := &syncBuffer{}
+			logger := slog.New(slog.NewTextHandler(buf, nil))
+			var opts []Option
+			if tt.policy != nil {
+				opts = append(opts, WithOriginPolicy(tt.policy))
+			}
+			h := New(newFakeStore(nil), logger, opts...)
 
-// TestServeOriginPolicyFalseRejects pins that a rejecting policy blocks the
-// connection with 403 before the store lookup or accept.
-func TestServeOriginPolicyFalseRejects(t *testing.T) {
-	buf := &syncBuffer{}
-	logger := slog.New(slog.NewTextHandler(buf, nil))
-	h := New(newFakeStore(nil), logger, WithOriginPolicy(func(r *http.Request) bool { return false }))
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
-	h.Serve(rec, req, "10.0.0.99")
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected 403, got %d", rec.Code)
-	}
-	if rec.Body.String() != "origin rejected\n" {
-		t.Errorf("expected body %q, got %q", "origin rejected\n", rec.Body.String())
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+			h.Serve(rec, req, "10.0.0.99")
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("expected 403, got %d", rec.Code)
+			}
+			if rec.Body.String() != "origin rejected\n" {
+				t.Errorf("expected body %q, got %q", "origin rejected\n", rec.Body.String())
+			}
+		})
 	}
 }
 

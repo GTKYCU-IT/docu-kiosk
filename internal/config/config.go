@@ -18,11 +18,17 @@ import (
 	"strings"
 )
 
-// DefaultCORSOrigins is the allowlist Load applies when CORS_ORIGINS is
+// defaultCORSOrigins is the allowlist Load applies when CORS_ORIGINS is
 // unset: any Chrome extension, since the extension ID varies per build. The
-// default lives here — the single module that owns the CORS policy. Callers
-// must not mutate the slice; Load hands out a copy.
-var DefaultCORSOrigins = []string{"chrome-extension://"}
+// default lives here — the single module that owns the CORS policy.
+var defaultCORSOrigins = []string{"chrome-extension://"}
+
+// DefaultCORSOrigins returns the default CORS allowlist as a fresh slice.
+// Load applies it when CORS_ORIGINS is unset; callers may mutate the
+// returned slice freely without affecting the package's internal default.
+func DefaultCORSOrigins() []string {
+	return slices.Clone(defaultCORSOrigins)
+}
 
 // Config holds every broker setting. CORSOrigins is the effective CORS
 // allowlist (Load substitutes the default when CORS_ORIGINS is unset);
@@ -95,7 +101,7 @@ func Load() (Config, error) {
 	if len(cfg.CORSOrigins) == 0 {
 		// Unset CORS_ORIGINS: apply the default allowlist here so the
 		// effective policy is decided in exactly one module.
-		cfg.CORSOrigins = slices.Clone(DefaultCORSOrigins)
+		cfg.CORSOrigins = DefaultCORSOrigins()
 	}
 
 	cfg.TrustedProxies, err = ParseTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
