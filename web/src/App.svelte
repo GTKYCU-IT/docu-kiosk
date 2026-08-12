@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import Register from "$lib/components/Register.svelte";
   import AddToHomeScreen from "$lib/components/AddToHomeScreen.svelte";
   import { Toaster } from "$lib/components/ui/sonner/index.js";
   import { Button } from "$lib/components/ui/button";
   import RefreshCCW from "@lucide/svelte/icons/refresh-ccw";
+  import { BrokerConnection, type BrokerState, type BrokerStatus } from "$lib/broker";
 
   const isStandalone =
     (navigator as any).standalone === true ||
@@ -18,6 +19,14 @@
     | "waiting"
     | "signing";
 
+  const statusToView: Record<BrokerStatus, View> = {
+    connecting: "validating",
+    unregistered: "register",
+    ready: "waiting",
+    reconnecting: "reconnecting",
+    signing: "signing",
+  };
+
   let view = $state<View>("validating");
 
   let kioskName = $state("");
@@ -27,6 +36,8 @@
   // Broker build version, shown as a subtle footer label. Loaded silently:
   // if the fetch fails there is nothing to show and the kiosk carries on.
   let brokerVersion = $state("");
+
+  let broker: BrokerConnection;
 
   onMount(() => {
     fetch("/api/version")
@@ -42,49 +53,26 @@
       signingInitialLoad = false;
       return;
     }
-    signingUrl = "";
-    view = "waiting";
+    broker.finishSigning();
   }
 
   onMount(() => {
-    if (view !== "validating") return;
-
-    let reconnectTimer: number;
-
-    function connect() {
-      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-      const ws = new WebSocket(`${protocol}//${location.host}/ws`);
-      let authenticated = false;
-
-      ws.onerror = () => {};
-
-      ws.onclose = () => {
-        if (authenticated) {
-          view = "reconnecting";
-          reconnectTimer = window.setTimeout(connect, 3000);
-        } else {
-          view = "register";
-        }
-      };
-
-      ws.onmessage = ({ data }) => {
-        const msg = JSON.parse(data);
-        if (msg.type === "connected") {
-          authenticated = true;
-          kioskName = msg.name;
-          view = "waiting";
-        } else if (msg.type === "sign") {
-          signingUrl = msg.url;
+    broker = new BrokerConnection({
+      url: `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`,
+      onChange: (s: BrokerState) => {
+        view = statusToView[s.status];
+        if (s.kioskName !== undefined) kioskName = s.kioskName;
+        if (s.status === "signing") {
+          if (s.signingUrl !== undefined) signingUrl = s.signingUrl;
           signingInitialLoad = true;
-          view = "signing";
+        } else if (signingUrl) {
+          signingUrl = "";
         }
-      };
-    }
-
-    connect();
-
-    return () => clearTimeout(reconnectTimer);
+      },
+    })
   });
+
+  onDestroy(() => broker.close());
 
   let spinning = $state(false);
 </script>
