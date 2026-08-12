@@ -346,9 +346,9 @@ func TestRegisterNameTakenByRacingRegister(t *testing.T) {
 	// ErrNameTaken via a second store answer, not a driver error code.
 	s := &stubStore{
 		upsertErr: errors.New("write failed"),
-		held: func(ip, name string) (bool, error) {
-			return s.nameChecks > 1, nil
-		},
+	}
+	s.held = func(ip, name string) (bool, error) {
+		return s.nameChecks > 1, nil
 	}
 	m, buf := newTestModule(s)
 
@@ -368,12 +368,12 @@ func TestRegisterDBFailureLogged(t *testing.T) {
 	// failure falls through to the logged wrapped-error path (not ErrNameTaken).
 	s := &stubStore{
 		upsertErr: errors.New("disk I/O error"),
-		held: func(ip, name string) (bool, error) {
-			if s.nameChecks > 1 {
-				return false, errors.New("name lookup failed")
-			}
-			return false, nil
-		},
+	}
+	s.held = func(ip, name string) (bool, error) {
+		if s.nameChecks > 1 {
+			return false, errors.New("name lookup failed")
+		}
+		return false, nil
 	}
 	m, buf := newTestModule(s)
 
