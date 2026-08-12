@@ -64,9 +64,29 @@ type conn interface {
 	CloseNow() error
 }
 
+// OriginPolicy decides whether a connection may be accepted. It receives the
+// full request so the policy can inspect the Origin header and the request
+// host. The policy is the hub's own security gate: it runs before the socket
+// is accepted, so a Hub fails closed even when used without the server's CORS
+// middleware.
+type OriginPolicy func(r *http.Request) bool
+
+// Option configures a Hub.
+type Option func(*Hub)
+
+// WithOriginPolicy injects the connection policy Serve enforces before
+// accepting a socket. Without it a Hub rejects every connection (fail
+// closed): opening the module to connections is an explicit caller decision.
+func WithOriginPolicy(p OriginPolicy) Option {
+	return func(h *Hub) {
+		h.originPolicy = p
+	}
+}
+
 type Hub struct {
 	store        KioskStore
 	logger       *slog.Logger
+	originPolicy OriginPolicy
 	mu           sync.RWMutex
 	sessions     map[uuid.UUID]conn
 	pingInterval time.Duration
@@ -75,20 +95,34 @@ type Hub struct {
 
 // New returns a Hub that authenticates kiosks against store and logs through
 // logger. pingInterval and pingTimeout default to 30s and 5s and are mutable
-// by package-hub tests.
-func New(store KioskStore, logger *slog.Logger) *Hub {
-	return &Hub{
+// by package-hub tests. By default the origin policy rejects every
+// connection; callers must inject one via WithOriginPolicy.
+func New(store KioskStore, logger *slog.Logger, opts ...Option) *Hub {
+	h := &Hub{
 		store:        store,
 		logger:       logger,
 		sessions:     make(map[uuid.UUID]conn),
 		pingInterval: 30 * time.Second,
 		pingTimeout:  5 * time.Second,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // Serve accepts the WebSocket, authenticates the kiosk IP against the store,
 // and runs the session until disconnect. Blocks for the connection lifetime.
+// The origin policy is the module's own security gate and runs first: a
+// connection is never authenticated, let alone accepted, unless the injected
+// policy admits it.
 func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, kioskIP string) {
+	if h.originPolicy == nil || !h.originPolicy(r) {
+		h.logger.Warn("ws connect rejected: origin policy", "ip", kioskIP, "origin", r.Header.Get("Origin"))
+		http.Error(w, "origin rejected", http.StatusForbidden)
+		return
+	}
+
 	k, err := h.store.GetKioskByIP(r.Context(), kioskIP)
 	if err != nil {
 		if errors.Is(err, kiosks.ErrNotFound) {
@@ -101,8 +135,11 @@ func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, kioskIP string) {
 		return
 	}
 
-	// InsecureSkipVerify is safe here: the broker runs on an internal network
-	// and the Vite dev proxy changes the Origin host during development.
+	// InsecureSkipVerify is safe here because the origin policy above is the
+	// gate: it runs before Accept and has already rejected every origin the
+	// module does not trust. Skipping Accept's (duplicate) origin verification
+	// is what lets the Vite dev proxy rewrite the Origin host during
+	// development without weakening the module's own check.
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	})

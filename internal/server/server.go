@@ -122,10 +122,19 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 	}
 
 	kioskModule := kiosks.New(db, logger)
+	corsCfg := newCORSConfig(cfg.CORSOrigins, logger)
 	s := &server{
-		db:             db,
-		kiosks:         kioskModule,
-		hub:            hub.New(kioskModule, logger),
+		db:     db,
+		kiosks: kioskModule,
+		// The CORS policy is enforced inside the hub as well as by the
+		// middleware, so the origin gate holds even if the hub is ever used
+		// without the middleware. A missing Origin means a non-browser
+		// client, which the middleware also passes through — there is
+		// nothing to gate.
+		hub: hub.New(kioskModule, logger, hub.WithOriginPolicy(func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			return origin == "" || corsCfg.isAllowed(origin, r)
+		})),
 		authModule:     authModule,
 		port:           cfg.Port,
 		logger:         logger,
@@ -160,7 +169,7 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 
 	s.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
-		Handler: newCORSConfig(cfg.CORSOrigins, logger).middleware(s.loggingMiddleware(mux)),
+		Handler: corsCfg.middleware(s.loggingMiddleware(mux)),
 	}
 
 	return s, nil
@@ -181,22 +190,14 @@ func (s *server) loggingMiddleware(next http.Handler) http.Handler {
 }
 
 type corsConfig struct {
-	allowedOrigins []string // full origins matched exactly, except "chrome-extension://" which is a prefix
+	allowedOrigins []string // full origins matched exactly; scheme-only entries (the config default) are prefix matches
 	logger         *slog.Logger
 }
 
-// newCORSConfig builds the CORS allowlist from the normalized origins parsed
-// by config.Load. An empty allowlist means CORS_ORIGINS was not configured,
-// so the default applies: any Chrome extension — the extension ID varies per
-// build.
+// newCORSConfig builds the CORS allowlist from the origins parsed by
+// config.Load, which owns the policy and applies its default when CORS_ORIGINS
+// is unset. The server never substitutes a default of its own.
 func newCORSConfig(origins []string, logger *slog.Logger) *corsConfig {
-	if len(origins) == 0 {
-		// Default: any Chrome extension — the extension ID varies per build.
-		return &corsConfig{
-			allowedOrigins: []string{"chrome-extension://"},
-			logger:         logger,
-		}
-	}
 	return &corsConfig{allowedOrigins: origins, logger: logger}
 }
 
@@ -219,7 +220,9 @@ func (c *corsConfig) isAllowed(origin string, r *http.Request) bool {
 		return true
 	}
 	for _, allowed := range c.allowedOrigins {
-		if allowed == "chrome-extension://" {
+		if strings.HasSuffix(allowed, "://") {
+			// Scheme-only entry (the config default): any origin with that
+			// scheme is allowed.
 			if strings.HasPrefix(origin, allowed) {
 				return true
 			}

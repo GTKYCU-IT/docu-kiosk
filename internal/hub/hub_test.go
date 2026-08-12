@@ -172,7 +172,9 @@ func (b *syncBuffer) String() string {
 func newTestHub(store KioskStore) (*Hub, *syncBuffer) {
 	buf := &syncBuffer{}
 	logger := slog.New(slog.NewTextHandler(buf, nil))
-	return New(store, logger), buf
+	// Tests of the session machinery opt in to a permissive policy; the
+	// origin gate itself is pinned by the TestServeOriginPolicy* tests.
+	return New(store, logger, WithOriginPolicy(func(r *http.Request) bool { return true })), buf
 }
 
 // waitFor polls condition until it holds or the deadline passes.
@@ -228,6 +230,77 @@ func TestServeAuthLookupErrorIsServerError(t *testing.T) {
 	}
 	if rec.Body.String() != "internal error\n" {
 		t.Errorf("expected body %q, got %q", "internal error\n", rec.Body.String())
+	}
+}
+
+// TestServeWithoutOriginPolicyRejects pins the fail-closed default: a Hub
+// with no injected policy must refuse every connection before anything else
+// happens, even one that would otherwise authenticate.
+func TestServeWithoutOriginPolicyRejects(t *testing.T) {
+	buf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(buf, nil))
+	h := New(newFakeStore(nil), logger)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	h.Serve(rec, req, "10.0.0.99")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", rec.Code)
+	}
+	if rec.Body.String() != "origin rejected\n" {
+		t.Errorf("expected body %q, got %q", "origin rejected\n", rec.Body.String())
+	}
+}
+
+// TestServeOriginPolicyFalseRejects pins that a rejecting policy blocks the
+// connection with 403 before the store lookup or accept.
+func TestServeOriginPolicyFalseRejects(t *testing.T) {
+	buf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(buf, nil))
+	h := New(newFakeStore(nil), logger, WithOriginPolicy(func(r *http.Request) bool { return false }))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	h.Serve(rec, req, "10.0.0.99")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", rec.Code)
+	}
+	if rec.Body.String() != "origin rejected\n" {
+		t.Errorf("expected body %q, got %q", "origin rejected\n", rec.Body.String())
+	}
+}
+
+// TestServeOriginPolicyAllowsRealConnection proves an admitting policy lets
+// the connection proceed all the way through accept and session start: the
+// kiosk receives the greeting over a real WebSocket.
+func TestServeOriginPolicyAllowsRealConnection(t *testing.T) {
+	id := uuid.New()
+	h, _ := newTestHub(newFakeStore(map[string]kiosks.Kiosk{
+		"10.0.0.5": {ID: id, Name: "lobby"},
+	}))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		h.Serve(w, r, "10.0.0.5")
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", &websocket.DialOptions{
+		HTTPHeader: http.Header{"Origin": []string{ts.URL}},
+	})
+	if err != nil {
+		t.Fatalf("dial with admitting policy: %v", err)
+	}
+	defer conn.CloseNow()
+
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `"connected"`; !strings.Contains(string(data), want) {
+		t.Errorf("first message = %s, want it to contain %s", data, want)
 	}
 }
 
