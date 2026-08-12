@@ -7,50 +7,10 @@ package database
 
 import (
 	"context"
+	"strings"
 
 	"github.com/google/uuid"
 )
-
-const createKiosk = `-- name: CreateKiosk :one
-INSERT INTO kiosks (
-    id,
-    ip,
-    name
-) VALUES (
-    ?,
-    ?,
-    ?
-) RETURNING id, ip, name
-`
-
-type CreateKioskParams struct {
-	ID   uuid.UUID
-	IP   string
-	Name string
-}
-
-func (q *Queries) CreateKiosk(ctx context.Context, arg CreateKioskParams) (Kiosk, error) {
-	row := q.db.QueryRowContext(ctx, createKiosk, arg.ID, arg.IP, arg.Name)
-	var i Kiosk
-	err := row.Scan(&i.ID, &i.IP, &i.Name)
-	return i, err
-}
-
-const getKioskByID = `-- name: GetKioskByID :one
-SELECT
-    id,
-    ip,
-    name
-FROM kiosks
-WHERE id = ?
-`
-
-func (q *Queries) GetKioskByID(ctx context.Context, id uuid.UUID) (Kiosk, error) {
-	row := q.db.QueryRowContext(ctx, getKioskByID, id)
-	var i Kiosk
-	err := row.Scan(&i.ID, &i.IP, &i.Name)
-	return i, err
-}
 
 const getKioskByIP = `-- name: GetKioskByIP :one
 SELECT
@@ -63,6 +23,91 @@ WHERE ip = ?
 
 func (q *Queries) GetKioskByIP(ctx context.Context, ip string) (Kiosk, error) {
 	row := q.db.QueryRowContext(ctx, getKioskByIP, ip)
+	var i Kiosk
+	err := row.Scan(&i.ID, &i.IP, &i.Name)
+	return i, err
+}
+
+const getKioskByName = `-- name: GetKioskByName :one
+SELECT
+    id,
+    ip,
+    name
+FROM kiosks
+WHERE name = ?
+`
+
+func (q *Queries) GetKioskByName(ctx context.Context, name string) (Kiosk, error) {
+	row := q.db.QueryRowContext(ctx, getKioskByName, name)
+	var i Kiosk
+	err := row.Scan(&i.ID, &i.IP, &i.Name)
+	return i, err
+}
+
+const listKiosksByIDs = `-- name: ListKiosksByIDs :many
+SELECT
+    id,
+    ip,
+    name
+FROM kiosks
+WHERE id IN (/*SLICE:ids*/?)
+ORDER BY name
+`
+
+func (q *Queries) ListKiosksByIDs(ctx context.Context, ids []uuid.UUID) ([]Kiosk, error) {
+	query := listKiosksByIDs
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Kiosk
+	for rows.Next() {
+		var i Kiosk
+		if err := rows.Scan(&i.ID, &i.IP, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const upsertKiosk = `-- name: UpsertKiosk :one
+INSERT INTO kiosks (
+    id,
+    ip,
+    name
+) VALUES (
+    ?,
+    ?,
+    ?
+) ON CONFLICT(ip) DO UPDATE SET name = excluded.name
+RETURNING id, ip, name
+`
+
+type UpsertKioskParams struct {
+	ID   uuid.UUID
+	IP   string
+	Name string
+}
+
+func (q *Queries) UpsertKiosk(ctx context.Context, arg UpsertKioskParams) (Kiosk, error) {
+	row := q.db.QueryRowContext(ctx, upsertKiosk, arg.ID, arg.IP, arg.Name)
 	var i Kiosk
 	err := row.Scan(&i.ID, &i.IP, &i.Name)
 	return i, err

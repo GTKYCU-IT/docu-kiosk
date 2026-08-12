@@ -20,6 +20,7 @@ import (
 	"github.com/calvertjadon/docu-kiosk/internal/config"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
+	"github.com/calvertjadon/docu-kiosk/internal/kiosks"
 	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/calvertjadon/docu-kiosk/internal/version"
 	"github.com/felixge/httpsnoop"
@@ -35,6 +36,7 @@ type kioskHub interface {
 
 type server struct {
 	db             *database.Queries
+	kiosks         *kiosks.Module
 	hub            kioskHub
 	authModule     *auth.AuthModule
 	httpServer     *http.Server
@@ -120,9 +122,11 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 		return nil, fmt.Errorf("init auth: %w", err)
 	}
 
+	kioskModule := kiosks.New(db, logger)
 	s := &server{
 		db:             db,
-		hub:            hub.New(kioskStore{db}, logger),
+		kiosks:         kioskModule,
+		hub:            hub.New(kioskStore{kioskModule}, logger),
 		authModule:     authModule,
 		port:           cfg.Port,
 		logger:         logger,

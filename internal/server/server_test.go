@@ -194,6 +194,68 @@ func TestRegisterBadJSON(t *testing.T) {
 	}
 }
 
+func TestRegisterIdempotent(t *testing.T) {
+	_, ts := setupTestServer(t)
+	registerKiosk(t, ts, "Lobby")
+	registerKiosk(t, ts, "Lobby")
+
+	_, name := connectWS(t, ts)
+	if name != "Lobby" {
+		t.Errorf("expected greeting name Lobby, got %s", name)
+	}
+
+	res, err := http.Get(ts.URL + "/api/kiosks")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer res.Body.Close()
+
+	var kiosks []struct {
+		ID   uuid.UUID `json:"id"`
+		Name string    `json:"name"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&kiosks); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(kiosks) != 1 {
+		t.Fatalf("expected exactly 1 kiosk, got %d", len(kiosks))
+	}
+	if kiosks[0].Name != "Lobby" {
+		t.Errorf("expected name Lobby, got %s", kiosks[0].Name)
+	}
+}
+
+func TestRegisterSameIPRenames(t *testing.T) {
+	_, ts := setupTestServer(t)
+	registerKiosk(t, ts, "A")
+	registerKiosk(t, ts, "B")
+
+	_, name := connectWS(t, ts)
+	if name != "B" {
+		t.Errorf("expected greeting name B, got %s", name)
+	}
+
+	res, err := http.Get(ts.URL + "/api/kiosks")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer res.Body.Close()
+
+	var kiosks []struct {
+		ID   uuid.UUID `json:"id"`
+		Name string    `json:"name"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&kiosks); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(kiosks) != 1 {
+		t.Fatalf("expected exactly 1 kiosk, got %d", len(kiosks))
+	}
+	if kiosks[0].Name != "B" {
+		t.Errorf("expected name B, got %s", kiosks[0].Name)
+	}
+}
+
 // --- List kiosks ---
 
 func TestListKiosksEmpty(t *testing.T) {
@@ -474,5 +536,26 @@ func TestHandleWSDelegatesToServe(t *testing.T) {
 	s.handleWS(rec, req)
 	if !sh.served {
 		t.Error("expected handleWS to delegate to hub.Serve")
+	}
+}
+
+func TestRespondWithErrorOpaque(t *testing.T) {
+	s := &server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	rr := httptest.NewRecorder()
+
+	s.respondWithError(rr, "login failed", http.StatusInternalServerError,
+		errors.New("sqlite: UNIQUE constraint failed: kiosks.name"))
+
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error != "login failed" {
+		t.Errorf("expected error %q, got %q", "login failed", body.Error)
+	}
+	if strings.Contains(rr.Body.String(), "sqlite") {
+		t.Error("response body must not contain raw error text")
 	}
 }
