@@ -107,11 +107,11 @@ func TestLoadDefaultTokenTTLs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.JWTTTL != 15*time.Second {
-		t.Errorf("JWTTTL = %v, want 15s", cfg.JWTTTL)
+	if cfg.JWTTTL != DefaultJWTTTL {
+		t.Errorf("JWTTTL = %v, want %v", cfg.JWTTTL, DefaultJWTTTL)
 	}
-	if cfg.RefreshTTL != 60*24*time.Hour {
-		t.Errorf("RefreshTTL = %v, want 60 days", cfg.RefreshTTL)
+	if cfg.RefreshTTL != DefaultRefreshTTL {
+		t.Errorf("RefreshTTL = %v, want %v", cfg.RefreshTTL, DefaultRefreshTTL)
 	}
 }
 
