@@ -6,20 +6,25 @@ export interface FakeDnrPort extends DnrPort {
   sessionRules: Map<number, chrome.declarativeNetRequest.Rule>
   /** public so tests can simulate counter drift back to BYPASS_RULE_START_ID */
   nextBypassId: number
+  /** public so tests can assert the tab→rule mapping is pruned on close */
+  tabRuleIds: Map<number, number[]>
 }
 
 export function createFakeDnrPort(): FakeDnrPort {
   const dynamicRules = new Map<number, chrome.declarativeNetRequest.Rule>()
   const sessionRules = new Map<number, chrome.declarativeNetRequest.Rule>()
+  const tabRuleIds = new Map<number, number[]>()
   let nextBypassId = BYPASS_RULE_START_ID
 
-  // Serializes ID allocation across concurrent bypass requests, mirroring the
-  // chrome adapter (dnr-port.ts): the counter read/advance must not interleave.
-  let allocationChain: Promise<void> = Promise.resolve()
+  // Serializes persisted-state mutations (ID allocation and the tab→rule
+  // map) across concurrent bypass requests, mirroring the chrome adapter
+  // (dnr-port.ts): the counter read/advance must not interleave.
+  let stateChain: Promise<void> = Promise.resolve()
 
   return {
     dynamicRules,
     sessionRules,
+    tabRuleIds,
     get nextBypassId() {
       return nextBypassId
     },
@@ -64,17 +69,41 @@ export function createFakeDnrPort(): FakeDnrPort {
       for (const rule of addRules) sessionRules.set(rule.id, rule)
     },
 
-    async removeBypassRules(ruleIds: number[]): Promise<void> {
-      for (const id of ruleIds) sessionRules.delete(id)
-    },
-
     async allocateBypassRuleIds(count: number): Promise<number[]> {
-      const result = allocationChain.then(() => {
+      const result = stateChain.then(() => {
         const ids = Array.from({ length: count }, (_, i) => nextBypassId + i)
         nextBypassId += count
         return ids
       })
-      allocationChain = result.then(
+      stateChain = result.then(
+        () => undefined,
+        () => undefined
+      )
+      return result
+    },
+
+    async rememberBypassTab(tabId: number, ruleIds: number[]): Promise<void> {
+      const result = stateChain.then(() => {
+        tabRuleIds.set(tabId, ruleIds)
+      })
+      stateChain = result.then(
+        () => undefined,
+        () => undefined
+      )
+      return result
+    },
+
+    async forgetBypassTab(tabId: number): Promise<number[] | undefined> {
+      const result = stateChain.then(() => {
+        const ruleIds = tabRuleIds.get(tabId)
+        if (ruleIds === undefined) return undefined
+        // Mirrors the chrome adapter: rules are removed before the mapping is
+        // forgotten.
+        for (const id of ruleIds) sessionRules.delete(id)
+        tabRuleIds.delete(tabId)
+        return ruleIds
+      })
+      stateChain = result.then(
         () => undefined,
         () => undefined
       )

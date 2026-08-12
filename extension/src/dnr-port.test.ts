@@ -58,10 +58,37 @@ describe('createChromeDnrPort', () => {
     expect(updateSessionRules).toHaveBeenCalledWith({ removeRuleIds: [100, 101], addRules: rules })
   })
 
-  it('removes bypass rules via updateSessionRules without addRules', async () => {
-    await createChromeDnrPort().removeBypassRules([100, 101])
+  it('removes a remembered tab\'s rules via updateSessionRules without addRules', async () => {
+    const port = createChromeDnrPort()
+    await port.rememberBypassTab(7, [100, 101])
+    await port.forgetBypassTab(7)
     expect(updateSessionRules).toHaveBeenCalledWith({ removeRuleIds: [100, 101] })
     expect(updateSessionRules.mock.calls[0][0]).not.toHaveProperty('addRules')
+  })
+
+  it('keeps the mapping intact when the rule removal fails', async () => {
+    const port = createChromeDnrPort()
+    await port.rememberBypassTab(7, [100, 101])
+    const error = new Error('session rules rejected')
+    updateSessionRules.mockRejectedValueOnce(error)
+    await expect(port.forgetBypassTab(7)).rejects.toBe(error)
+    // The rules still have an owner: a retry can clean them up.
+    await expect(port.forgetBypassTab(7)).resolves.toEqual([100, 101])
+  })
+
+  it('serializes concurrent forgets without resurrecting entries', async () => {
+    const port = createChromeDnrPort()
+    await port.rememberBypassTab(7, [100, 101])
+    await port.rememberBypassTab(8, [102, 103])
+    const [first, second] = await Promise.all([
+      port.forgetBypassTab(7),
+      port.forgetBypassTab(8),
+    ])
+    expect(first).toEqual([100, 101])
+    expect(second).toEqual([102, 103])
+    // Without chain serialization, one forget would write back a map that
+    // re-includes the other tab's entry.
+    expect(sessionStore.get('bypassTabRuleIds')).toEqual({})
   })
 
   it('propagates updateDynamicRules rejections', async () => {
@@ -104,6 +131,51 @@ describe('createChromeDnrPort', () => {
     const all = [...first, ...second].sort((a, b) => a - b)
     expect(all).toEqual([100, 101, 102, 103])
   })
+
+  it('remembers the tab→rule mapping in storage.session', async () => {
+    await createChromeDnrPort().rememberBypassTab(7, [100, 101])
+    expect(sessionStore.get('bypassTabRuleIds')).toEqual({ 7: [100, 101] })
+  })
+
+  it('forgets a tab mapping and returns its rule IDs', async () => {
+    const port = createChromeDnrPort()
+    await port.rememberBypassTab(7, [100, 101])
+    await expect(port.forgetBypassTab(7)).resolves.toEqual([100, 101])
+    expect(sessionStore.get('bypassTabRuleIds')).toEqual({})
+  })
+
+  it('forget returns undefined for an unmapped tab', async () => {
+    await expect(createChromeDnrPort().forgetBypassTab(7)).resolves.toBeUndefined()
+  })
+
+  it('keeps other tabs mapped when forgetting one tab', async () => {
+    const port = createChromeDnrPort()
+    await port.rememberBypassTab(7, [100, 101])
+    await port.rememberBypassTab(8, [102, 103])
+    await port.forgetBypassTab(7)
+    await expect(port.forgetBypassTab(8)).resolves.toEqual([102, 103])
+  })
+
+  it('keeps the tab→rule mapping across adapter recreation (worker restart)', async () => {
+    const first = createChromeDnrPort()
+    await first.rememberBypassTab(7, [100, 101])
+    await expect(createChromeDnrPort().forgetBypassTab(7)).resolves.toEqual([100, 101])
+  })
+
+  it('clears the tab→rule mapping with the store (browser restart)', async () => {
+    const first = createChromeDnrPort()
+    await first.rememberBypassTab(7, [100, 101])
+    sessionStore.clear()
+    await expect(createChromeDnrPort().forgetBypassTab(7)).resolves.toBeUndefined()
+  })
+
+  it('tolerates a corrupted stored tab map', async () => {
+    sessionStore.set('bypassTabRuleIds', 'garbage')
+    const port = createChromeDnrPort()
+    await expect(port.forgetBypassTab(7)).resolves.toBeUndefined()
+    await port.rememberBypassTab(7, [100, 101])
+    await expect(port.forgetBypassTab(7)).resolves.toEqual([100, 101])
+  })
 })
 
 describe('createFakeDnrPort', () => {
@@ -127,14 +199,6 @@ describe('createFakeDnrPort', () => {
     expect(port.sessionRules.get(101)).toBeDefined()
     expect(port.sessionRules.has(199)).toBe(false)
     expect(port.dynamicRules.size).toBe(0)
-  })
-
-  it('removes bypass rules from the session map', async () => {
-    const port = createFakeDnrPort()
-    await port.addBypassRules([makeRule(100), makeRule(101)], [])
-    await port.removeBypassRules([100])
-    expect(port.sessionRules.has(100)).toBe(false)
-    expect(port.sessionRules.has(101)).toBe(true)
   })
 
   it('allocates consecutive IDs and advances the counter', async () => {
@@ -166,5 +230,16 @@ describe('createFakeDnrPort', () => {
     const second = await port.allocateBypassRuleIds(2)
     const all = [...first, ...second]
     expect(new Set(all).size).toBe(all.length)
+  })
+
+  it('remembers and forgets the tab→rule mapping, removing the rules too', async () => {
+    const port = createFakeDnrPort()
+    await port.addBypassRules([makeRule(100), makeRule(101)], [])
+    await port.rememberBypassTab(7, [100, 101])
+    expect(port.tabRuleIds.get(7)).toEqual([100, 101])
+    await expect(port.forgetBypassTab(7)).resolves.toEqual([100, 101])
+    expect(port.tabRuleIds.size).toBe(0)
+    expect(port.sessionRules.size).toBe(0)
+    await expect(port.forgetBypassTab(7)).resolves.toBeUndefined()
   })
 })
