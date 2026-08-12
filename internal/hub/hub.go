@@ -83,18 +83,18 @@ func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, kioskIP string) {
 		return
 	}
 
-	h.runSession(r.Context(), k, kioskIP, c)
+	h.runSession(r.Context(), k, c)
 }
 
 // runSession drives one kiosk connection through register, greeting, ping, and
 // read, cleaning up the session on exit.
-func (h *Hub) runSession(ctx context.Context, k kiosks.Kiosk, ip string, c conn) {
+func (h *Hub) runSession(ctx context.Context, k kiosks.Kiosk, c conn) {
 	defer c.CloseNow()
 
 	h.mu.Lock()
 	h.sessions[k.ID] = c
 	h.mu.Unlock()
-	h.logger.Info("kiosk connected", "kiosk_id", k.ID, "name", k.Name, "ip", ip)
+	h.logger.Info("kiosk connected", "kiosk_id", k.ID, "name", k.Name, "ip", k.IP)
 	defer func() {
 		h.mu.Lock()
 		if h.sessions[k.ID] == c {
