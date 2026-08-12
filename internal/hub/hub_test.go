@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/calvertjadon/docu-kiosk/internal/kiosks"
 	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
@@ -129,24 +130,24 @@ func (f *fakeConn) lastWrite() []byte {
 	return f.writes[len(f.writes)-1]
 }
 
-// fakeStore is a map-backed KioskStore: unknown IPs yield ErrKioskNotFound,
+// fakeStore is a map-backed KioskStore: unknown IPs yield kiosks.ErrNotFound,
 // and an injected lookupErr overrides everything.
 type fakeStore struct {
-	kiosks    map[string]Kiosk
+	kiosks    map[string]kiosks.Kiosk
 	lookupErr error
 }
 
-func newFakeStore(kiosks map[string]Kiosk) *fakeStore {
+func newFakeStore(kiosks map[string]kiosks.Kiosk) *fakeStore {
 	return &fakeStore{kiosks: kiosks}
 }
 
-func (s *fakeStore) GetKioskByIP(_ context.Context, ip string) (Kiosk, error) {
+func (s *fakeStore) GetKioskByIP(_ context.Context, ip string) (kiosks.Kiosk, error) {
 	if s.lookupErr != nil {
-		return Kiosk{}, s.lookupErr
+		return kiosks.Kiosk{}, s.lookupErr
 	}
 	k, ok := s.kiosks[ip]
 	if !ok {
-		return Kiosk{}, ErrKioskNotFound
+		return kiosks.Kiosk{}, kiosks.ErrNotFound
 	}
 	return k, nil
 }
@@ -192,7 +193,7 @@ func waitFor(t *testing.T, condition func() bool) {
 // startSession runs runSession in a goroutine and returns the conn, a done
 // channel closed when the session exits, and a cleanup that releases the
 // session's read and waits for it to finish.
-func startSession(t *testing.T, h *Hub, k Kiosk, ip string, c *fakeConn) chan struct{} {
+func startSession(t *testing.T, h *Hub, k kiosks.Kiosk, ip string, c *fakeConn) chan struct{} {
 	t.Helper()
 	done := make(chan struct{})
 	go func() {
@@ -236,7 +237,7 @@ func TestRunSessionGreetsAndRegisters(t *testing.T) {
 	h, _ := newTestHub(nil)
 	id := uuid.New()
 	fc := newFakeConn()
-	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
 
 	waitFor(t, func() bool {
 		return slices.Contains(h.Connected(), id) && len(fc.recordedWrites()) >= 1
@@ -255,7 +256,7 @@ func TestRunSessionDisconnectRemovesSession(t *testing.T) {
 	h, _ := newTestHub(nil)
 	id := uuid.New()
 	fc := newFakeConn()
-	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
 
 	waitFor(t, func() bool { return slices.Contains(h.Connected(), id) })
 
@@ -270,7 +271,7 @@ func TestRunSessionPingFailureClosesSession(t *testing.T) {
 	id := uuid.New()
 	fc := newFakeConn()
 	fc.pingErr = errors.New("ping timeout")
-	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
 
 	// The session may register and tear down (5ms ping interval) before the
 	// first poll, so assert on the recorded greeting write instead: it is
@@ -285,7 +286,7 @@ func TestRunSessionGreetingWriteFailureTearsDown(t *testing.T) {
 	fc := newFakeConn()
 	// The greeting write fails before the session ever serves a message.
 	fc.setWriteErr(errors.New("socket closed"))
-	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
 
 	// The session registers, the greeting write fails, and teardown removes it.
 	waitFor(t, func() bool { return len(h.Connected()) == 0 })
@@ -305,11 +306,11 @@ func TestRunSessionReconnectReplacesSession(t *testing.T) {
 	id := uuid.New()
 
 	connA := newFakeConn()
-	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connA)
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connA)
 	waitFor(t, func() bool { return slices.Contains(h.Connected(), id) })
 
 	connB := newFakeConn()
-	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connB)
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connB)
 
 	// B's greeting proves B registered and replaced A in the sessions map.
 	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
@@ -351,7 +352,7 @@ func TestSendWritesProtocolMessage(t *testing.T) {
 	h, _ := newTestHub(nil)
 	id := uuid.New()
 	fc := newFakeConn()
-	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
 
 	waitFor(t, func() bool {
 		return slices.Contains(h.Connected(), id) && len(fc.recordedWrites()) >= 1
@@ -386,7 +387,7 @@ func TestSendWriteFailureIsServerError(t *testing.T) {
 	h, buf := newTestHub(nil)
 	id := uuid.New()
 	fc := newFakeConn()
-	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", fc)
 
 	// Fail only the Send write, after the greeting succeeded.
 	waitFor(t, func() bool {
@@ -421,7 +422,7 @@ func TestSendReconnectMidWriteIsWriteFailed(t *testing.T) {
 
 	// connA is the live session; its greeting succeeds before we arm the gate.
 	connA := newFakeConn()
-	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connA)
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connA)
 	waitFor(t, func() bool {
 		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
 	})
@@ -450,7 +451,7 @@ func TestSendReconnectMidWriteIsWriteFailed(t *testing.T) {
 
 	// While Send is blocked, the kiosk reconnects and replaces the session.
 	connB := newFakeConn()
-	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connB)
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connB)
 	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
 
 	// Release the stale write; Send must detect the swap and fail loudly.
@@ -498,7 +499,7 @@ func TestSendReconnectMidWriteWriteErrorIsWriteFailed(t *testing.T) {
 
 	// connA is the live session; its greeting succeeds before we arm the gate.
 	connA := newFakeConn()
-	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connA)
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connA)
 	waitFor(t, func() bool {
 		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
 	})
@@ -532,7 +533,7 @@ func TestSendReconnectMidWriteWriteErrorIsWriteFailed(t *testing.T) {
 
 	// While Send is blocked, the kiosk reconnects and replaces the session.
 	connB := newFakeConn()
-	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connB)
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connB)
 	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
 
 	// Release the stale write; Send must report the failed write against the
@@ -587,7 +588,7 @@ func TestSendDisconnectMidWriteIsWriteFailed(t *testing.T) {
 
 	// connA is the live session; its greeting succeeds before we arm the gate.
 	connA := newFakeConn()
-	startSession(t, h, Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connA)
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby"}, "10.0.0.5", connA)
 	waitFor(t, func() bool {
 		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
 	})
@@ -661,7 +662,7 @@ func TestConcurrent(t *testing.T) {
 		sessionsWG.Add(1)
 		go func() {
 			defer sessionsWG.Done()
-			h.runSession(context.Background(), Kiosk{ID: id, Name: "kiosk"}, "10.0.0.5", fc)
+			h.runSession(context.Background(), kiosks.Kiosk{ID: id, Name: "kiosk"}, "10.0.0.5", fc)
 		}()
 	}
 

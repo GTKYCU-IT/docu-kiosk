@@ -18,7 +18,7 @@ import (
 // ErrNameTaken is returned by Register when the name is held by a different kiosk.
 var ErrNameTaken = errors.New("kiosk name already in use")
 
-// ErrNotFound is returned by ResolveIdentity when the IP is not registered.
+// ErrNotFound is returned by GetKioskByIP when the IP is not registered.
 var ErrNotFound = errors.New("kiosk not found")
 
 // Kiosk identifies a registered kiosk in the directory.
@@ -79,9 +79,9 @@ func (m *Module) Register(ctx context.Context, ip, name string) error {
 	return nil
 }
 
-// ResolveIdentity looks up the kiosk registered under ip. An unregistered IP
+// GetKioskByIP looks up the kiosk registered under ip. An unregistered IP
 // yields ErrNotFound.
-func (m *Module) ResolveIdentity(ctx context.Context, ip string) (Kiosk, error) {
+func (m *Module) GetKioskByIP(ctx context.Context, ip string) (Kiosk, error) {
 	row, err := m.store.GetKioskByIP(ctx, ip)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

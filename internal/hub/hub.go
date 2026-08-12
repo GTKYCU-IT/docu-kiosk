@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/calvertjadon/docu-kiosk/internal/kiosks"
 	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
@@ -21,19 +22,10 @@ var ErrNotConnected = errors.New("kiosk not connected")
 // ErrWriteFailed is returned when a session exists but the socket write fails.
 var ErrWriteFailed = errors.New("write to kiosk failed")
 
-// ErrKioskNotFound is returned when auth lookup finds no kiosk for the IP.
-var ErrKioskNotFound = errors.New("kiosk not found")
-
-// Kiosk identifies a kiosk authorized to connect.
-type Kiosk struct {
-	ID   uuid.UUID
-	Name string
-}
-
-// KioskStore is the auth seam. Implemented by the server's DB adapter
-// (production) and by a map-based fake (tests).
+// KioskStore is the auth seam. Implemented by the kiosks module (production)
+// and by a map-based fake (tests).
 type KioskStore interface {
-	GetKioskByIP(ctx context.Context, ip string) (Kiosk, error)
+	GetKioskByIP(ctx context.Context, ip string) (kiosks.Kiosk, error)
 }
 
 // conn is the subset of *websocket.Conn the hub drives.
@@ -71,7 +63,7 @@ func New(store KioskStore, logger *slog.Logger) *Hub {
 func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, kioskIP string) {
 	k, err := h.store.GetKioskByIP(r.Context(), kioskIP)
 	if err != nil {
-		if errors.Is(err, ErrKioskNotFound) {
+		if errors.Is(err, kiosks.ErrNotFound) {
 			h.logger.Warn("ws connect rejected: unregistered ip", "ip", kioskIP)
 			http.Error(w, "unregistered ip", http.StatusUnauthorized)
 			return
@@ -96,7 +88,7 @@ func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, kioskIP string) {
 
 // runSession drives one kiosk connection through register, greeting, ping, and
 // read, cleaning up the session on exit.
-func (h *Hub) runSession(ctx context.Context, k Kiosk, ip string, c conn) {
+func (h *Hub) runSession(ctx context.Context, k kiosks.Kiosk, ip string, c conn) {
 	defer c.CloseNow()
 
 	h.mu.Lock()

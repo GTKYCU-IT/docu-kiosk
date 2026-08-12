@@ -1,12 +1,10 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 
-	"github.com/calvertjadon/docu-kiosk/internal/hub"
 	"github.com/calvertjadon/docu-kiosk/internal/kiosks"
 	"github.com/google/uuid"
 )
@@ -60,18 +58,4 @@ func (s *server) handleListKiosks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.respondWithJSON(w, http.StatusOK, list)
-}
-
-// kioskStore adapts the kiosk module to the hub auth seam.
-type kioskStore struct{ m *kiosks.Module }
-
-func (ks kioskStore) GetKioskByIP(ctx context.Context, ip string) (hub.Kiosk, error) {
-	k, err := ks.m.ResolveIdentity(ctx, ip)
-	if err != nil {
-		if errors.Is(err, kiosks.ErrNotFound) {
-			return hub.Kiosk{}, hub.ErrKioskNotFound
-		}
-		return hub.Kiosk{}, err
-	}
-	return hub.Kiosk{ID: k.ID, Name: k.Name}, nil
 }
