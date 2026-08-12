@@ -131,10 +131,14 @@ describe('requestBypass', () => {
       throw new Error('Receiving end does not exist')
     })
     const pending = requestBypass('https://sign.example/abc', sender)
+    // Attach the rejection handler before advancing timers: the final throw
+    // lands while advanceTimersByTimeAsync drains the microtask queue, so a
+    // handler attached afterwards would be flagged as an unhandled rejection.
+    const rejected = expect(pending).rejects.toBeInstanceOf(BypassWakeError)
     await vi.advanceTimersByTimeAsync(0)
     await vi.advanceTimersByTimeAsync(300)
     await vi.advanceTimersByTimeAsync(600)
-    await expect(pending).rejects.toBeInstanceOf(BypassWakeError)
+    await rejected
     expect(sender).toHaveBeenCalledTimes(3)
   })
 })
