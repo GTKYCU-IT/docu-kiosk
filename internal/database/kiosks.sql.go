@@ -28,22 +28,6 @@ func (q *Queries) GetKioskByIP(ctx context.Context, ip string) (Kiosk, error) {
 	return i, err
 }
 
-const getKioskByName = `-- name: GetKioskByName :one
-SELECT
-    id,
-    ip,
-    name
-FROM kiosks
-WHERE name = ?
-`
-
-func (q *Queries) GetKioskByName(ctx context.Context, name string) (Kiosk, error) {
-	row := q.db.QueryRowContext(ctx, getKioskByName, name)
-	var i Kiosk
-	err := row.Scan(&i.ID, &i.IP, &i.Name)
-	return i, err
-}
-
 const listKiosksByIDs = `-- name: ListKiosksByIDs :many
 SELECT
     id,
@@ -85,6 +69,26 @@ func (q *Queries) ListKiosksByIDs(ctx context.Context, ids []uuid.UUID) ([]Kiosk
 		return nil, err
 	}
 	return items, nil
+}
+
+const nameHeldByOther = `-- name: NameHeldByOther :one
+SELECT EXISTS (
+    SELECT 1
+    FROM kiosks
+    WHERE name = ?1 AND ip != ?2
+) AS held
+`
+
+type NameHeldByOtherParams struct {
+	Name string
+	IP   string
+}
+
+func (q *Queries) NameHeldByOther(ctx context.Context, arg NameHeldByOtherParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, nameHeldByOther, arg.Name, arg.IP)
+	var held bool
+	err := row.Scan(&held)
+	return held, err
 }
 
 const upsertKiosk = `-- name: UpsertKiosk :one

@@ -18,13 +18,12 @@ SELECT
 FROM kiosks
 WHERE ip = ?;
 
--- name: GetKioskByName :one
-SELECT
-    id,
-    ip,
-    name
-FROM kiosks
-WHERE name = ?;
+-- name: NameHeldByOther :one
+SELECT EXISTS (
+    SELECT 1
+    FROM kiosks
+    WHERE name = sqlc.arg('name') AND ip != sqlc.arg('ip')
+) AS held;
 
 -- name: ListKiosksByIDs :many
 SELECT
