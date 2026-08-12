@@ -1,3 +1,5 @@
+import { createChromeDnrPort, type DnrPort } from './dnr-port'
+
 /**
  * Signing entry-point URL patterns on DocuSign's hosts.
  *
@@ -14,41 +16,13 @@ export const SIGNING_URL_FILTERS: string[] = [
   '^https://[^/]*\\.docusign\\.net/Member/PowerForm', // PowerForms
   '^https://apps\\.docusign\\.com/authenticate', // new embedded-signing host (2026)
 ]
-/** Rule IDs 1–4 are the intercept patterns. IDs 5–99 are reserved. IDs 100+ are per-tab bypass allow rules. */
-const BYPASS_RULE_START_ID = 100
-
-/**
- * Session-scoped DNR rules survive service-worker restarts (MV3 workers are
- * killed after ~30s idle), but module state does not — so the next free
- * bypass rule ID lives in chrome.storage.session, which has exactly the same
- * lifetime as the session rules: it survives worker restarts and is cleared
- * on browser restart. Without this, a bypass after a worker restart reused
- * IDs 100/101 while the previous tab's rules were still installed, and Chrome
- * rejected the update ("Rule with id 100 does not have a unique ID").
- */
-const BYPASS_ID_STORAGE_KEY = 'bypassNextRuleId'
-
-// Serializes ID allocation across concurrent bypass requests within one
-// worker lifetime (storage.session has no compare-and-swap primitive).
-let bypassAllocationChain: Promise<void> = Promise.resolve()
-
-async function nextBypassRuleIds(): Promise<number[]> {
-  const result = bypassAllocationChain.then(async () => {
-    const stored = await chrome.storage.session.get(BYPASS_ID_STORAGE_KEY)
-    const raw = stored[BYPASS_ID_STORAGE_KEY]
-    const next = typeof raw === 'number' && Number.isInteger(raw) ? raw : BYPASS_RULE_START_ID
-    await chrome.storage.session.set({ [BYPASS_ID_STORAGE_KEY]: next + 2 })
-    return [next, next + 1]
-  })
-  bypassAllocationChain = result.then(
-    () => undefined,
-    () => undefined
-  )
-  return result
-}
-
 const ALL_RULE_IDS = [1, 2, 3, 4]
 const BYPASS_HOSTS = ['*://*.docusign.net/*', '*://*.docusign.com/*']
+
+// All declarative-net-request access — intercept install, bypass add/remove,
+// and bypass-ID allocation — goes through the port. Production uses the
+// Chrome-backed adapter; tests inject the fake.
+const dnrPort: DnrPort = createChromeDnrPort()
 
 /** Active bypass allow-rule IDs, keyed by tabId. Used for cleanup when the tab closes. */
 const bypassRuleIds = new Map<number, number[]>()
@@ -99,19 +73,16 @@ export async function handleBypass(url: string) {
   if (!tab.id) throw new Error('tab has no id')
 
   try {
-    const ruleIds = await nextBypassRuleIds()
+    const ruleIds = await dnrPort.allocateBypassRuleIds(2)
     const rules = buildBypassRules(tab.id, ruleIds[0])
     // Sweep-then-add in one atomic call: if the counter ever drifts from the
-    // installed rules (e.g. storage.session cleared on extension reload while
-    // session rules persisted), stale rules with these IDs are removed first
-    // instead of rejecting the whole update with "Rule with id N does not
-    // have a unique ID". Live rules never carry these IDs — the counter is
-    // monotonic within a browser session — so this cannot disable another
-    // tab's bypass.
-    await chrome.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: ruleIds,
-      addRules: rules
-    })
+    // installed rules (e.g. the session counter is cleared on extension
+    // reload while session rules persisted), stale rules with these IDs are
+    // removed first instead of rejecting the whole update with "Rule with id
+    // N does not have a unique ID". Live rules never carry these IDs — the
+    // counter is monotonic within a browser session — so this cannot disable
+    // another tab's bypass.
+    await dnrPort.addBypassRules(rules, ruleIds)
     bypassRuleIds.set(tab.id, ruleIds)
 
     await chrome.tabs.update(tab.id, { url, active: true })
@@ -127,9 +98,8 @@ function removeBypassRules(tabId: number) {
   const ruleIds = bypassRuleIds.get(tabId)
   if (!ruleIds) return
   bypassRuleIds.delete(tabId)
-  void chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds })
+  void dnrPort.removeBypassRules(ruleIds)
 }
-
 
 export async function installRules() {
   try {
@@ -137,10 +107,7 @@ export async function installRules() {
     // that left them behind, then install the current set.  Bypass rules are
     // session-scoped and auto-clear on browser restart, so no sweep needed.
     const rules = buildRules(chrome.runtime.getURL('src/intercepted/index.html'))
-    await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: ALL_RULE_IDS,
-      addRules: rules
-    })
+    await dnrPort.installInterceptRules(rules, ALL_RULE_IDS)
   } catch (err) {
     // A rejected install (e.g. an oversized regex) used to fail silently and
     // disable interception with no trace — surface it in the SW console.
