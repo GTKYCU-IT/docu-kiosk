@@ -107,6 +107,15 @@ func TestLoadDefaultTokenTTLs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
+	// Pin the exported policy to the spec-mandated values, so referencing
+	// DefaultJWTTTL/DefaultRefreshTTL elsewhere cannot silently drift from
+	// the 15s / 60-day defaults.
+	if DefaultJWTTTL != 15*time.Second {
+		t.Errorf("DefaultJWTTTL = %v, want 15s", DefaultJWTTTL)
+	}
+	if DefaultRefreshTTL != 60*24*time.Hour {
+		t.Errorf("DefaultRefreshTTL = %v, want 60 days", DefaultRefreshTTL)
+	}
 	if cfg.JWTTTL != DefaultJWTTTL {
 		t.Errorf("JWTTTL = %v, want %v", cfg.JWTTTL, DefaultJWTTTL)
 	}
