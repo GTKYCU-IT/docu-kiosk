@@ -21,7 +21,6 @@ import (
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
 	"github.com/calvertjadon/docu-kiosk/internal/kiosks"
-	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/calvertjadon/docu-kiosk/internal/version"
 	"github.com/felixge/httpsnoop"
 	"github.com/google/uuid"
@@ -30,7 +29,7 @@ import (
 // kioskHub is the session-module surface the HTTP handlers consume.
 type kioskHub interface {
 	Serve(w http.ResponseWriter, r *http.Request, kioskIP string)
-	Send(ctx context.Context, id uuid.UUID, msg protocol.Message) error
+	PushSign(ctx context.Context, id uuid.UUID, url string) error
 	Connected() []uuid.UUID
 }
 

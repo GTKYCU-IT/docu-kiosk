@@ -3,6 +3,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,10 +12,37 @@ import (
 	"time"
 
 	"github.com/calvertjadon/docu-kiosk/internal/kiosks"
-	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 )
+
+// Wire message shapes. The broker is the only sender: a greeting is written
+// when a kiosk connects, and sign instructions are pushed on demand. The
+// field order below is the wire order, so it must not change without a
+// coordinated browser-client update (web/src/lib/broker.ts).
+type greeting struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+func newGreeting(name string) greeting {
+	return greeting{Name: name, Type: "connected"}
+}
+
+type sign struct {
+	Type string `json:"type"`
+	URL  string `json:"url"`
+}
+
+func newSign(url string) sign {
+	return sign{Type: "sign", URL: url}
+}
+
+// marshal is the single wire-marshal path for kiosk messages. All messages
+// sent to kiosks must be serialized through this function.
+func marshal(v any) ([]byte, error) {
+	return json.Marshal(v)
+}
 
 // ErrNotConnected is returned when sending to a kiosk with no live session.
 var ErrNotConnected = errors.New("kiosk not connected")
@@ -104,7 +132,7 @@ func (h *Hub) runSession(ctx context.Context, k kiosks.Kiosk, ip string, c conn)
 		h.logger.Info("kiosk disconnected", "kiosk_id", k.ID, "name", k.Name)
 	}()
 
-	data, err := protocol.Marshal(protocol.NewGreeting(k.Name))
+	data, err := marshal(newGreeting(k.Name))
 	if err != nil {
 		h.logger.Error("marshal greeting", "error", err, "kiosk_id", k.ID)
 		return
@@ -119,6 +147,9 @@ func (h *Hub) runSession(ctx context.Context, k kiosks.Kiosk, ip string, c conn)
 
 	go h.pingLoop(ctx, cancel, c)
 
+	// Kiosks are receive-only: they never send application frames, so every
+	// inbound frame is intentionally discarded. Reads exist purely to observe
+	// connection errors and context cancellation.
 	for {
 		if _, _, err := c.Read(ctx); err != nil {
 			return
@@ -148,15 +179,15 @@ func (h *Hub) pingLoop(ctx context.Context, cancel context.CancelFunc, c conn) {
 	}
 }
 
-// Send writes a protocol message to the kiosk session. Unregistered ->
-// ErrNotConnected (Warn-logged). Registered but write fails -> ErrWriteFailed
-// wrapping the write error (Error-logged with kiosk_id). Send reports success
-// only when the session that received the write is still the live session on
-// completion; a kiosk that reconnects or disconnects mid-write yields
-// ErrWriteFailed (Warn-logged), even when the stale conn accepted the write.
-// Logging of failures lives INSIDE Send.
-func (h *Hub) Send(ctx context.Context, id uuid.UUID, msg protocol.Message) error {
-	data, err := protocol.Marshal(msg)
+// PushSign instructs a connected kiosk to open a signing session at url.
+// Unregistered -> ErrNotConnected (Warn-logged). Registered but write fails
+// -> ErrWriteFailed wrapping the write error (Error-logged with kiosk_id).
+// PushSign reports success only when the session that received the write is
+// still the live session on completion; a kiosk that reconnects or
+// disconnects mid-write yields ErrWriteFailed (Warn-logged), even when the
+// stale conn accepted the write. Logging of failures lives INSIDE PushSign.
+func (h *Hub) PushSign(ctx context.Context, id uuid.UUID, url string) error {
+	data, err := marshal(newSign(url))
 	if err != nil {
 		h.logger.Error("push failed: marshal", "error", err, "kiosk_id", id)
 		return err
@@ -200,8 +231,8 @@ func (h *Hub) Send(ctx context.Context, id uuid.UUID, msg protocol.Message) erro
 
 // sessionState reports whether id still maps to a live session and, if so,
 // whether that session is a different conn than c (i.e. a replacement took
-// over). Send calls it only after a Write completes; no lock is held across
-// the Write itself.
+// over). PushSign calls it only after a Write completes; no lock is held
+// across the Write itself.
 func (h *Hub) sessionState(id uuid.UUID, c conn) (still, replaced bool) {
 	h.mu.RLock()
 	cur, ok := h.sessions[id]
