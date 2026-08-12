@@ -6,7 +6,6 @@ import (
 	"net/http"
 
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
-	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/google/uuid"
 )
 
@@ -26,8 +25,7 @@ func (s *server) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg := protocol.NewSign(body.URL)
-	if err := s.hub.Send(r.Context(), kioskID, msg); err != nil {
+	if err := s.hub.PushSign(r.Context(), kioskID, body.URL); err != nil {
 		if errors.Is(err, hub.ErrNotConnected) {
 			http.Error(w, "kiosk not connected", http.StatusNotFound)
 			return

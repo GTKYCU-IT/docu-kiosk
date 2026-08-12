@@ -3,7 +3,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"math/rand/v2"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	"github.com/calvertjadon/docu-kiosk/internal/kiosks"
-	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 )
@@ -207,6 +205,16 @@ func startSession(t *testing.T, h *Hub, k kiosks.Kiosk, c *fakeConn) chan struct
 	return done
 }
 
+// assertPushedSign asserts that the conn's last write is exactly the sign
+// wire JSON for the given url.
+func assertPushedSign(t *testing.T, fc *fakeConn, url string) {
+	t.Helper()
+	want := `{"type":"sign","url":"` + url + `"}`
+	if got := string(fc.lastWrite()); got != want {
+		t.Errorf("expected %s, got %s", want, got)
+	}
+}
+
 func TestServeRejectsUnregisteredIP(t *testing.T) {
 	h, _ := newTestHub(newFakeStore(nil))
 	rec := httptest.NewRecorder()
@@ -243,12 +251,9 @@ func TestRunSessionGreetsAndRegisters(t *testing.T) {
 		return slices.Contains(h.Connected(), id) && len(fc.recordedWrites()) >= 1
 	})
 
-	want, err := protocol.Marshal(protocol.NewGreeting("lobby"))
-	if err != nil {
-		t.Fatalf("marshal greeting: %v", err)
-	}
-	if got := fc.lastWrite(); !bytes.Equal(got, want) {
-		t.Errorf("expected greeting %q, got %q", want, got)
+	want := `{"name":"lobby","type":"connected"}`
+	if got := string(fc.lastWrite()); got != want {
+		t.Errorf("expected greeting %s, got %s", want, got)
 	}
 }
 
@@ -331,24 +336,18 @@ func TestRunSessionReconnectReplacesSession(t *testing.T) {
 	}
 
 	// The live session B must still accept writes.
-	msg := protocol.NewSign("https://docusign.example.com/signing/abc123")
-	if err := h.Send(context.Background(), id, msg); err != nil {
-		t.Fatalf("send after stale teardown: %v", err)
+	url := "https://docusign.example.com/signing/abc123"
+	if err := h.PushSign(context.Background(), id, url); err != nil {
+		t.Fatalf("push sign after stale teardown: %v", err)
 	}
-	var got protocol.Sign
-	if err := json.Unmarshal(connB.lastWrite(), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got != msg {
-		t.Errorf("expected %+v, got %+v", msg, got)
-	}
+	assertPushedSign(t, connB, url)
 
 	// B's death removes the session entirely.
 	connB.closeRead()
 	waitFor(t, func() bool { return len(h.Connected()) == 0 })
 }
 
-func TestSendWritesProtocolMessage(t *testing.T) {
+func TestPushSignWritesSignMessage(t *testing.T) {
 	h, _ := newTestHub(nil)
 	id := uuid.New()
 	fc := newFakeConn()
@@ -358,45 +357,39 @@ func TestSendWritesProtocolMessage(t *testing.T) {
 		return slices.Contains(h.Connected(), id) && len(fc.recordedWrites()) >= 1
 	})
 
-	want := protocol.NewSign("https://docusign.example.com/signing/abc123")
-	if err := h.Send(context.Background(), id, want); err != nil {
-		t.Fatalf("send: %v", err)
+	url := "https://docusign.example.com/signing/abc123"
+	if err := h.PushSign(context.Background(), id, url); err != nil {
+		t.Fatalf("push sign: %v", err)
 	}
 
-	var got protocol.Sign
-	if err := json.Unmarshal(fc.lastWrite(), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got != want {
-		t.Errorf("expected %+v, got %+v", want, got)
-	}
+	assertPushedSign(t, fc, url)
 }
 
-func TestSendToUnregistered(t *testing.T) {
+func TestPushSignToUnregistered(t *testing.T) {
 	h, _ := newTestHub(nil)
-	err := h.Send(context.Background(), uuid.New(), protocol.NewSign("https://example.com"))
+	err := h.PushSign(context.Background(), uuid.New(), "https://example.com")
 	if !errors.Is(err, ErrNotConnected) {
 		t.Errorf("expected ErrNotConnected, got %v", err)
 	}
 	if errors.Is(err, ErrWriteFailed) {
-		t.Error("unregistered send must not be ErrWriteFailed")
+		t.Error("unregistered push must not be ErrWriteFailed")
 	}
 }
 
-func TestSendWriteFailureIsServerError(t *testing.T) {
+func TestPushSignWriteFailureIsServerError(t *testing.T) {
 	h, buf := newTestHub(nil)
 	id := uuid.New()
 	fc := newFakeConn()
 	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, fc)
 
-	// Fail only the Send write, after the greeting succeeded.
+	// Fail only the PushSign write, after the greeting succeeded.
 	waitFor(t, func() bool {
 		return slices.Contains(h.Connected(), id) && len(fc.recordedWrites()) >= 1
 	})
 	underlying := errors.New("socket closed")
 	fc.setWriteErr(underlying)
 
-	err := h.Send(context.Background(), id, protocol.NewSign("https://example.com"))
+	err := h.PushSign(context.Background(), id, "https://example.com")
 	if !errors.Is(err, ErrWriteFailed) {
 		t.Errorf("expected ErrWriteFailed, got %v", err)
 	}
@@ -416,7 +409,7 @@ func TestSendWriteFailureIsServerError(t *testing.T) {
 	}
 }
 
-func TestSendReconnectMidWriteIsWriteFailed(t *testing.T) {
+func TestPushSignReconnectMidWriteIsWriteFailed(t *testing.T) {
 	h, buf := newTestHub(nil)
 	id := uuid.New()
 
@@ -427,7 +420,7 @@ func TestSendReconnectMidWriteIsWriteFailed(t *testing.T) {
 		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
 	})
 
-	// Gate connA's Writes: Send grabs connA and blocks inside Write.
+	// Gate connA's Writes: PushSign grabs connA and blocks inside Write.
 	release := make(chan struct{})
 	defer func() {
 		select {
@@ -440,21 +433,21 @@ func TestSendReconnectMidWriteIsWriteFailed(t *testing.T) {
 	connA.setWriteGate(release, entered)
 	sendDone := make(chan error, 1)
 	go func() {
-		sendDone <- h.Send(context.Background(), id, protocol.NewSign("https://example.com"))
+		sendDone <- h.PushSign(context.Background(), id, "https://example.com")
 	}()
 
 	select {
 	case <-entered:
 	case <-time.After(2 * time.Second):
-		t.Fatal("send did not block inside Write")
+		t.Fatal("push sign did not block inside Write")
 	}
 
-	// While Send is blocked, the kiosk reconnects and replaces the session.
+	// While PushSign is blocked, the kiosk reconnects and replaces the session.
 	connB := newFakeConn()
 	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB)
 	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
 
-	// Release the stale write; Send must detect the swap and fail loudly.
+	// Release the stale write; PushSign must detect the swap and fail loudly.
 	close(release)
 	select {
 	case err := <-sendDone:
@@ -465,7 +458,7 @@ func TestSendReconnectMidWriteIsWriteFailed(t *testing.T) {
 			t.Error("mid-write reconnect must not be ErrNotConnected")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("send did not return after write released")
+		t.Fatal("push sign did not return after write released")
 	}
 
 	logged := buf.String()
@@ -476,24 +469,18 @@ func TestSendReconnectMidWriteIsWriteFailed(t *testing.T) {
 		t.Errorf("expected log to contain kiosk id %s, got: %s", id, logged)
 	}
 
-	// The replacement session is still live and still accepts writes.
+	// The replacement session is still live and still accepts pushes.
 	if got := h.Connected(); len(got) != 1 || got[0] != id {
 		t.Fatalf("expected exactly session %v, got %v", id, got)
 	}
-	msg := protocol.NewSign("https://docusign.example.com/signing/def456")
-	if err := h.Send(context.Background(), id, msg); err != nil {
-		t.Fatalf("send to replacement session: %v", err)
+	url := "https://docusign.example.com/signing/def456"
+	if err := h.PushSign(context.Background(), id, url); err != nil {
+		t.Fatalf("push sign to replacement session: %v", err)
 	}
-	var got protocol.Sign
-	if err := json.Unmarshal(connB.lastWrite(), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got != msg {
-		t.Errorf("expected %+v, got %+v", msg, got)
-	}
+	assertPushedSign(t, connB, url)
 }
 
-func TestSendReconnectMidWriteWriteErrorIsWriteFailed(t *testing.T) {
+func TestPushSignReconnectMidWriteWriteErrorIsWriteFailed(t *testing.T) {
 	h, buf := newTestHub(nil)
 	id := uuid.New()
 
@@ -509,7 +496,7 @@ func TestSendReconnectMidWriteWriteErrorIsWriteFailed(t *testing.T) {
 	underlying := errors.New("socket closed")
 	connA.setWriteErr(underlying)
 
-	// Gate connA's Writes: Send grabs connA and blocks inside Write.
+	// Gate connA's Writes: PushSign grabs connA and blocks inside Write.
 	release := make(chan struct{})
 	defer func() {
 		select {
@@ -522,22 +509,22 @@ func TestSendReconnectMidWriteWriteErrorIsWriteFailed(t *testing.T) {
 	connA.setWriteGate(release, entered)
 	sendDone := make(chan error, 1)
 	go func() {
-		sendDone <- h.Send(context.Background(), id, protocol.NewSign("https://example.com"))
+		sendDone <- h.PushSign(context.Background(), id, "https://example.com")
 	}()
 
 	select {
 	case <-entered:
 	case <-time.After(2 * time.Second):
-		t.Fatal("send did not block inside Write")
+		t.Fatal("push sign did not block inside Write")
 	}
 
-	// While Send is blocked, the kiosk reconnects and replaces the session.
+	// While PushSign is blocked, the kiosk reconnects and replaces the session.
 	connB := newFakeConn()
 	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB)
 	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
 
-	// Release the stale write; Send must report the failed write against the
-	// lost session, wrapping both ErrWriteFailed and the underlying error.
+	// Release the stale write; PushSign must report the failed write against
+	// the lost session, wrapping both ErrWriteFailed and the underlying error.
 	close(release)
 	select {
 	case err := <-sendDone:
@@ -551,7 +538,7 @@ func TestSendReconnectMidWriteWriteErrorIsWriteFailed(t *testing.T) {
 			t.Errorf("expected %v to wrap underlying write error %v", err, underlying)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("send did not return after write released")
+		t.Fatal("push sign did not return after write released")
 	}
 
 	logged := buf.String()
@@ -565,24 +552,18 @@ func TestSendReconnectMidWriteWriteErrorIsWriteFailed(t *testing.T) {
 		t.Errorf("expected log to contain kiosk id %s, got: %s", id, logged)
 	}
 
-	// The replacement session is still live and still accepts writes.
+	// The replacement session is still live and still accepts pushes.
 	if got := h.Connected(); len(got) != 1 || got[0] != id {
 		t.Fatalf("expected exactly session %v, got %v", id, got)
 	}
-	msg := protocol.NewSign("https://docusign.example.com/signing/def456")
-	if err := h.Send(context.Background(), id, msg); err != nil {
-		t.Fatalf("send to replacement session: %v", err)
+	url := "https://docusign.example.com/signing/def456"
+	if err := h.PushSign(context.Background(), id, url); err != nil {
+		t.Fatalf("push sign to replacement session: %v", err)
 	}
-	var got protocol.Sign
-	if err := json.Unmarshal(connB.lastWrite(), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got != msg {
-		t.Errorf("expected %+v, got %+v", msg, got)
-	}
+	assertPushedSign(t, connB, url)
 }
 
-func TestSendDisconnectMidWriteIsWriteFailed(t *testing.T) {
+func TestPushSignDisconnectMidWriteIsWriteFailed(t *testing.T) {
 	h, buf := newTestHub(nil)
 	id := uuid.New()
 
@@ -593,7 +574,7 @@ func TestSendDisconnectMidWriteIsWriteFailed(t *testing.T) {
 		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
 	})
 
-	// Gate connA's Writes: Send grabs connA and blocks inside Write.
+	// Gate connA's Writes: PushSign grabs connA and blocks inside Write.
 	release := make(chan struct{})
 	defer func() {
 		select {
@@ -606,22 +587,22 @@ func TestSendDisconnectMidWriteIsWriteFailed(t *testing.T) {
 	connA.setWriteGate(release, entered)
 	sendDone := make(chan error, 1)
 	go func() {
-		sendDone <- h.Send(context.Background(), id, protocol.NewSign("https://example.com"))
+		sendDone <- h.PushSign(context.Background(), id, "https://example.com")
 	}()
 
 	select {
 	case <-entered:
 	case <-time.After(2 * time.Second):
-		t.Fatal("send did not block inside Write")
+		t.Fatal("push sign did not block inside Write")
 	}
 
-	// While Send is blocked, the kiosk disconnects: teardown deletes the
+	// While PushSign is blocked, the kiosk disconnects: teardown deletes the
 	// session entry. CloseNow runs after the delete in the deferred chain, so
 	// observing isClosed proves the entry is gone before we release the write.
 	connA.closeRead()
 	waitFor(t, func() bool { return connA.isClosed() })
 
-	// Release the write; the session is gone, so Send must report the loss
+	// Release the write; the session is gone, so PushSign must report the loss
 	// instead of silently reporting success.
 	close(release)
 	select {
@@ -633,7 +614,7 @@ func TestSendDisconnectMidWriteIsWriteFailed(t *testing.T) {
 			t.Error("mid-write disconnect must not be ErrNotConnected")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("send did not return after write released")
+		t.Fatal("push sign did not return after write released")
 	}
 
 	logged := buf.String()
@@ -673,7 +654,7 @@ func TestConcurrent(t *testing.T) {
 			defer churnWG.Done()
 			for range iterations {
 				h.Connected()
-				_ = h.Send(context.Background(), ids[rand.IntN(sessions)], protocol.NewSign("https://example.com"))
+				_ = h.PushSign(context.Background(), ids[rand.IntN(sessions)], "https://example.com")
 			}
 		}()
 	}

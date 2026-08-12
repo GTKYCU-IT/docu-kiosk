@@ -20,7 +20,6 @@ import (
 	"github.com/calvertjadon/docu-kiosk/internal/config"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
-	"github.com/calvertjadon/docu-kiosk/internal/protocol"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/pressly/goose/v3"
@@ -540,7 +539,7 @@ func (sh *stubHub) Serve(w http.ResponseWriter, r *http.Request, kioskIP string)
 	sh.served = true
 }
 
-func (sh *stubHub) Send(ctx context.Context, id uuid.UUID, msg protocol.Message) error {
+func (sh *stubHub) PushSign(ctx context.Context, id uuid.UUID, url string) error {
 	return sh.sendErr
 }
 
