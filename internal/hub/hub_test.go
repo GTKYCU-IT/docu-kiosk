@@ -205,6 +205,16 @@ func startSession(t *testing.T, h *Hub, k kiosks.Kiosk, ip string, c *fakeConn) 
 	return done
 }
 
+// assertPushedSign asserts that the conn's last write is exactly the sign
+// wire JSON for the given url.
+func assertPushedSign(t *testing.T, fc *fakeConn, url string) {
+	t.Helper()
+	want := `{"type":"sign","url":"` + url + `"}`
+	if got := string(fc.lastWrite()); got != want {
+		t.Errorf("expected %s, got %s", want, got)
+	}
+}
+
 func TestServeRejectsUnregisteredIP(t *testing.T) {
 	h, _ := newTestHub(newFakeStore(nil))
 	rec := httptest.NewRecorder()
@@ -330,10 +340,7 @@ func TestRunSessionReconnectReplacesSession(t *testing.T) {
 	if err := h.PushSign(context.Background(), id, url); err != nil {
 		t.Fatalf("push sign after stale teardown: %v", err)
 	}
-	want := `{"type":"sign","url":"https://docusign.example.com/signing/abc123"}`
-	if got := string(connB.lastWrite()); got != want {
-		t.Errorf("expected %s, got %s", want, got)
-	}
+	assertPushedSign(t, connB, url)
 
 	// B's death removes the session entirely.
 	connB.closeRead()
@@ -355,10 +362,7 @@ func TestPushSignWritesSignMessage(t *testing.T) {
 		t.Fatalf("push sign: %v", err)
 	}
 
-	want := `{"type":"sign","url":"https://docusign.example.com/signing/abc123"}`
-	if got := string(fc.lastWrite()); got != want {
-		t.Errorf("expected %s, got %s", want, got)
-	}
+	assertPushedSign(t, fc, url)
 }
 
 func TestPushSignToUnregistered(t *testing.T) {
@@ -473,10 +477,7 @@ func TestPushSignReconnectMidWriteIsWriteFailed(t *testing.T) {
 	if err := h.PushSign(context.Background(), id, url); err != nil {
 		t.Fatalf("push sign to replacement session: %v", err)
 	}
-	want := `{"type":"sign","url":"https://docusign.example.com/signing/def456"}`
-	if got := string(connB.lastWrite()); got != want {
-		t.Errorf("expected %s, got %s", want, got)
-	}
+	assertPushedSign(t, connB, url)
 }
 
 func TestPushSignReconnectMidWriteWriteErrorIsWriteFailed(t *testing.T) {
@@ -559,10 +560,7 @@ func TestPushSignReconnectMidWriteWriteErrorIsWriteFailed(t *testing.T) {
 	if err := h.PushSign(context.Background(), id, url); err != nil {
 		t.Fatalf("push sign to replacement session: %v", err)
 	}
-	want := `{"type":"sign","url":"https://docusign.example.com/signing/def456"}`
-	if got := string(connB.lastWrite()); got != want {
-		t.Errorf("expected %s, got %s", want, got)
-	}
+	assertPushedSign(t, connB, url)
 }
 
 func TestPushSignDisconnectMidWriteIsWriteFailed(t *testing.T) {
