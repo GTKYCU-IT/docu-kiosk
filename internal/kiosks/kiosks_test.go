@@ -250,7 +250,7 @@ func TestResolveIdentityUnknownIP(t *testing.T) {
 
 // --- Listing ---
 
-func TestListLiveOrdersByNameAndFilters(t *testing.T) {
+func TestListLiveOrdersByName(t *testing.T) {
 	db := newTestDB(t)
 	m := testModule(db)
 	ctx := context.Background()
