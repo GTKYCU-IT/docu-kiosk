@@ -1,10 +1,9 @@
 // Wire message shapes, hand-mirrored from the broker's protocol package
 // (internal/hub). The message set is sealed and maintained by hand on both
-// sides: any change must be edited in Go and here in lockstep (see
-// docs/adr/0003-hand-maintained-wire-protocol.md). This module is the only
-// TypeScript home for the wire message string literals and field-shape
-// checks; callers dispatch on the typed Message union instead of inspecting
-// raw payloads.
+// sides: any change must be edited in Go and here in lockstep. This module is
+// the only TypeScript home for the wire message string literals and
+// field-shape checks; callers dispatch on the typed Message union instead of
+// inspecting raw payloads.
 
 export type Message =
   | { type: "connected"; name: string }
