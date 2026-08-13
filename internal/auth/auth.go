@@ -28,6 +28,8 @@ var (
 // tokens AuthModule's operations need. *database.Queries implements it in
 // production; tests inject fakes to exercise error paths without a database.
 type store interface {
+	CountUsers(ctx context.Context) (int64, error)
+	CreateUser(ctx context.Context, arg database.CreateUserParams) (database.User, error)
 	GetUserByUsername(ctx context.Context, username string) (database.User, error)
 	GetUser(ctx context.Context, id uuid.UUID) (database.User, error)
 	GetRefreshToken(ctx context.Context, token string) (database.RefreshToken, error)
@@ -44,10 +46,11 @@ type TokenLifetimes struct {
 	RefreshTTL time.Duration // lifetime of issued refresh tokens
 }
 
-// AuthModule owns login, refresh rotation, and JWT validation. It is the
-// single seam for authentication logic — HTTP handlers become thin adapters
-// that parse JSON and call these methods. Token lifetimes are injected so the
-// policy lives in config, not here.
+// AuthModule owns login, refresh rotation, JWT validation, and the admin-user
+// bootstrap. It is the single seam for authentication logic — HTTP handlers
+// and the server bootstrap become thin adapters that parse input and call
+// these methods. Token lifetimes are injected so the policy lives in config,
+// not here.
 type AuthModule struct {
 	store     store
 	jwtKey    []byte
@@ -162,4 +165,42 @@ func (a *AuthModule) Validate(ctx context.Context, tokenString string) (database
 	}
 
 	return user, nil
+}
+
+// EnsureAdminUser bootstraps the admin user on first boot. When the users
+// table already has users it is a no-op — existing credentials are never
+// validated or reset. On an empty table it enforces the credential policy
+// (non-empty username and password, password at least 8 characters), hashes
+// the password, and creates a UUID-backed user. It owns every bootstrap rule
+// and database operation, so the server only supplies credentials.
+func (a *AuthModule) EnsureAdminUser(username, password string) error {
+	count, err := a.store.CountUsers(context.Background())
+	if err != nil {
+		return fmt.Errorf("count users: %w", err)
+	}
+	if count > 0 {
+		return nil
+	}
+
+	if username == "" || password == "" {
+		return errors.New("AUTH_USERNAME and AUTH_PASSWORD are required on first boot (users table is empty)")
+	}
+	if len(password) < 8 {
+		return errors.New("AUTH_PASSWORD must be at least 8 characters")
+	}
+
+	hash, err := HashPassword(password)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+
+	if _, err := a.store.CreateUser(context.Background(), database.CreateUserParams{
+		ID:       uuid.New(),
+		Username: username,
+		Password: hash,
+	}); err != nil {
+		return fmt.Errorf("create admin user: %w", err)
+	}
+
+	return nil
 }
