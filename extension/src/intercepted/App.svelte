@@ -3,12 +3,12 @@
   import { getConfig } from '../config'
   import {
     INTERCEPT_HASH_PREFIX,
-    listKiosks,
-    pushSession,
     requestBypass,
     BypassResponseError,
+    BrokerClient,
     type Kiosk,
-  } from '../lib/broker-client'
+    type BrokerState,
+  } from '../lib/broker'
   import { Button } from '$lib/components/ui/button'
   import { ExternalLink, Send } from '@lucide/svelte'
   import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '$lib/components/ui/card'
@@ -18,9 +18,8 @@
   let kiosks = $state<Kiosk[]>([])
   let sending = $state(false)
   let copied = $state(false)
-  let brokerUrl = $state('')
   let pendingUrl = $state('')
-  let pollInterval: ReturnType<typeof setInterval> | undefined
+  let client: BrokerClient | undefined
 
   onMount(async () => {
     const hash = window.location.hash
@@ -32,44 +31,51 @@
     pendingUrl = hash.slice(INTERCEPT_HASH_PREFIX.length)
 
     const cfg = await getConfig()
-    brokerUrl = cfg.brokerUrl ?? ''
+    const brokerUrl = cfg.brokerUrl ?? ''
 
     if (!brokerUrl) {
       status = 'Broker URL not configured. Open the extension options to set it.'
       return
     }
 
-    await refreshKiosks()
-    pollInterval = setInterval(refreshKiosks, 3000)
+    client = new BrokerClient({
+      url: brokerUrl,
+      onChange: applyState,
+    })
+    // The broker owns the listing loop: one immediate request, then
+    // recurring polling with dedup. Polling pauses while a push is in
+    // flight and resumes automatically if a push fails.
+    client.listKiosks()
   })
 
-  onDestroy(() => clearInterval(pollInterval))
+  onDestroy(() => client?.close())
 
-  async function refreshKiosks() {
-    if (sending) return
-    try {
-      const fetched = await listKiosks(brokerUrl)
-      const prevIds = new Set(kiosks.map(k => k.id))
-      const unchanged = fetched.length === prevIds.size && fetched.every(k => prevIds.has(k.id))
-      if (unchanged) return
-      kiosks = fetched
-      status = fetched.length === 0 ? 'No kiosks are connected. Waiting…' : 'Select a kiosk:'
-    } catch {
+  // Translate the broker's typed state into the page's render state. The
+  // statuses mirror the strings the page used before the client existed:
+  // loading keeps the neutral waiting text, unreachable keeps the last
+  // kiosk list and shows the reachability error, and ready renders the
+  // kiosk list or the empty state.
+  function applyState(state: BrokerState) {
+    if (state.status === 'loading') {
+      status = ''
+    } else if (state.status === 'unreachable') {
       status = 'Could not reach broker. Check that it is running.'
+    } else {
+      kiosks = state.kiosks
+      status = state.kiosks.length === 0 ? 'No kiosks are connected. Waiting…' : 'Select a kiosk:'
     }
   }
 
   async function sendToKiosk(kiosk: Kiosk) {
+    if (!client) return
     sending = true
-    clearInterval(pollInterval)
     status = `Sending to ${kiosk.name}…`
     try {
-      await pushSession(brokerUrl, kiosk.id, pendingUrl)
+      await client.push(kiosk.id, pendingUrl)
       window.close()
     } catch {
       status = `Failed to send to ${kiosk.name}.`
       sending = false
-      pollInterval = setInterval(refreshKiosks, 3000)
     }
   }
 

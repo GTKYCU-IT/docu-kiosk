@@ -1,5 +1,5 @@
 import type { Bypass } from './bypass'
-import { BYPASS_MESSAGE_TYPE } from './lib/broker-client'
+import { BYPASS_MESSAGE_TYPE } from './lib/broker'
 
 /**
  * Wire the service-worker listeners: toolbar action, navigation logging,
