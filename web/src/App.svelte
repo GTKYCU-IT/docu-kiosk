@@ -6,6 +6,9 @@
   import { Button } from "$lib/components/ui/button";
   import RefreshCCW from "@lucide/svelte/icons/refresh-ccw";
   import { BrokerConnection, type BrokerState, type BrokerStatus } from "$lib/broker";
+  import AdminPrototype from "$lib/components/admin-prototype/AdminPrototype.svelte";
+
+  const isAdminPrototype = location.pathname === "/admin/prototype";
 
   const isStandalone =
     (navigator as any).standalone === true ||
@@ -37,9 +40,10 @@
   // if the fetch fails there is nothing to show and the kiosk carries on.
   let brokerVersion = $state("");
 
-  let broker: BrokerConnection;
+  let broker: BrokerConnection | undefined;
 
   onMount(() => {
+    if (isAdminPrototype) return;
     fetch("/api/version")
       .then((r) => (r.ok ? r.json() : null))
       .then((d: { version?: string } | null) => {
@@ -53,10 +57,11 @@
       signingInitialLoad = false;
       return;
     }
-    broker.finishSigning();
+    broker?.finishSigning();
   }
 
   onMount(() => {
+    if (isAdminPrototype) return;
     broker = new BrokerConnection({
       url: `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`,
       onChange: (s: BrokerState) => {
@@ -72,11 +77,14 @@
     })
   });
 
-  onDestroy(() => broker.close());
+  onDestroy(() => broker?.close());
 
   let spinning = $state(false);
 </script>
 
+{#if isAdminPrototype}
+  <AdminPrototype />
+{:else}
 <Toaster position="top-center" />
 
 <!-- Subtle build-version footer; hidden while signing so it never overlays
@@ -129,4 +137,5 @@
       <RefreshCCW class={["size-4", { "animate-spin": spinning }]} />
     </Button>
   </div>
+{/if}
 {/if}
