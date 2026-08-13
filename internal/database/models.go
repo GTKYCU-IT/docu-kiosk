@@ -11,9 +11,11 @@ import (
 )
 
 type Kiosk struct {
-	ID   uuid.UUID
-	IP   string
-	Name string
+	ID      uuid.UUID
+	IP      string
+	Name    string
+	NameKey string
+	Version int64
 }
 
 type RefreshToken struct {

@@ -6,14 +6,13 @@ require (
 	github.com/coder/websocket v1.8.14
 	github.com/felixge/httpsnoop v1.0.4
 	github.com/google/uuid v1.6.0
+	github.com/joho/godotenv v1.5.1
 	github.com/pressly/goose/v3 v3.27.1
+	golang.org/x/text v0.36.0
 	modernc.org/sqlite v1.50.1
 )
 
-require (
-	github.com/joho/godotenv v1.5.1 // indirect
-	golang.org/x/crypto v0.50.0 // indirect
-)
+require golang.org/x/crypto v0.50.0 // indirect
 
 require (
 	github.com/alexedwards/argon2id v1.0.0
@@ -27,7 +26,6 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/tools v0.43.0 // indirect
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

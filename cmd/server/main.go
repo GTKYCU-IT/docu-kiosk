@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"os"
 
 	"github.com/calvertjadon/docu-kiosk/internal/config"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
+	"github.com/calvertjadon/docu-kiosk/internal/kiosks"
 	"github.com/calvertjadon/docu-kiosk/internal/server"
 	"github.com/joho/godotenv"
 	"github.com/pressly/goose/v3"
@@ -41,6 +43,14 @@ func main() {
 	}
 	if err := goose.Up(db, "./sql/migrations"); err != nil {
 		slog.Error("run migrations", "error", err)
+		os.Exit(1)
+	}
+
+	// Backfill existing kiosk rows onto the shared name boundary before the
+	// server serves; a normalization collision aborts startup with an
+	// explicit report and leaves the data untouched.
+	if err := kiosks.Migrate(context.Background(), db); err != nil {
+		slog.Error("migrate kiosk names", "error", err)
 		os.Exit(1)
 	}
 

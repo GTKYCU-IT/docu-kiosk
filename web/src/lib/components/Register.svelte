@@ -4,12 +4,19 @@
   import { Input } from "$lib/components/ui/input";
   import { Field, FieldGroup, FieldLabel } from "$lib/components/ui/field";
   import { toast } from "svelte-sonner";
+  import { classifyRegistration } from "$lib/registration";
+
+  let {
+    onRegistered,
+    onAlreadyRegistered,
+  }: { onRegistered: () => void; onAlreadyRegistered: () => void } = $props();
 
   let name = $state("");
   let loading = $state(false);
 
   async function register(e: SubmitEvent) {
     e.preventDefault();
+    if (loading) return;
     loading = true;
     try {
       const res = await fetch("/api/kiosks", {
@@ -17,11 +24,30 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
       });
-      if (!res.ok) {
-        toast.error("Registration failed. Please try again.");
-        return;
+      const outcome = classifyRegistration(
+        res.status,
+        res.headers.get("content-type"),
+        await res.text(),
+      );
+      switch (outcome.kind) {
+        case "registered":
+          // New identity established: reload into the kiosk session.
+          onRegistered();
+          return;
+        case "already-registered":
+          // The kiosk identity exists but the original 204 was lost. The App
+          // reopens the broker session; the greeting supplies the name.
+          onAlreadyRegistered();
+          return;
+        case "name-conflict":
+          // The name is held by another kiosk. Keep the submitted input on
+          // the form and leave registration unresolved.
+          toast.error("That name is already in use by another kiosk. Choose a different name.");
+          return;
+        case "rejected":
+          toast.error("Registration failed. Please try again.");
+          return;
       }
-      location.reload();
     } catch {
       toast.error("Could not reach the server. Check your network connection.");
     } finally {

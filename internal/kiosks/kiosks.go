@@ -8,17 +8,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/google/uuid"
 )
 
-// ErrNameRequired is returned by Register when name is empty or
-// whitespace-only.
-var ErrNameRequired = errors.New("kiosk name is required")
+// ErrAlreadyRegistered is returned by Register when the source IP already
+// holds a kiosk identity; the stored identity and name are never changed.
+var ErrAlreadyRegistered = errors.New("kiosk already registered")
 
-// ErrNameTaken is returned by Register when the name is held by a different kiosk.
+// ErrNameTaken is returned by Register when the normalized name key is held
+// by a different kiosk.
 var ErrNameTaken = errors.New("kiosk name already in use")
 
 // ErrNotFound is returned by GetKioskByIP when the IP is not registered.
@@ -34,22 +34,22 @@ type Kiosk struct {
 // store is the persistence seam for the kiosk directory. dbStore adapts
 // *database.Queries to it in production; tests inject fakes.
 type store interface {
-	UpsertKiosk(ctx context.Context, arg database.UpsertKioskParams) (database.Kiosk, error)
+	CreateKiosk(ctx context.Context, arg database.CreateKioskParams) (database.Kiosk, error)
 	GetKioskByIP(ctx context.Context, ip string) (database.Kiosk, error)
-	NameHeldByOther(ctx context.Context, ip, name string) (bool, error)
+	NameKeyHeldByOther(ctx context.Context, ip, nameKey string) (bool, error)
 	ListKiosksByIDs(ctx context.Context, ids []uuid.UUID) ([]database.Kiosk, error)
 }
 
 // dbStore adapts *database.Queries to the domain-shaped store seam. sqlc
-// generates a params struct for the two-argument NameHeldByOther query, so
-// the adapter bridges it into the seam's flat signature; the remaining seam
-// methods are promoted from the embedded *database.Queries.
+// generates a params struct for the two-argument NameKeyHeldByOther query,
+// so the adapter bridges it into the seam's flat signature; the remaining
+// seam methods are promoted from the embedded *database.Queries.
 type dbStore struct {
 	*database.Queries
 }
 
-func (d dbStore) NameHeldByOther(ctx context.Context, ip, name string) (bool, error) {
-	return d.Queries.NameHeldByOther(ctx, database.NameHeldByOtherParams{IP: ip, Name: name})
+func (d dbStore) NameKeyHeldByOther(ctx context.Context, ip, nameKey string) (bool, error) {
+	return d.Queries.NameKeyHeldByOther(ctx, database.NameKeyHeldByOtherParams{IP: ip, NameKey: nameKey})
 }
 
 // Module is the kiosk directory. It owns registration and identity
@@ -70,36 +70,49 @@ func newModule(s store, logger *slog.Logger) *Module {
 	return &Module{store: s, logger: logger}
 }
 
-// Register upserts a kiosk under ip with a fresh identity, renaming the
-// kiosk when ip is already registered under a different name. It returns
-// ErrNameRequired when name is empty or whitespace-only, and ErrNameTaken
-// when name is held by a different kiosk; same-IP renames hit the upsert's
-// ON CONFLICT clause and never error. On success the stored identity
-// returned by the upsert is logged under "kiosk registered".
-func (m *Module) Register(ctx context.Context, ip, name string) error {
-	if strings.TrimSpace(name) == "" {
-		return ErrNameRequired
+// Register creates a kiosk identity for ip from the normalized form of
+// rawName. It returns ErrInvalidName when rawName falls outside the shared
+// name boundary, ErrAlreadyRegistered when ip already holds an identity
+// (checked before any name conflict; the stored identity and name are never
+// mutated), and ErrNameTaken when the normalized name key is held by a
+// different kiosk. On success the stored identity is logged under "kiosk
+// registered".
+func (m *Module) Register(ctx context.Context, ip, rawName string) error {
+	display, err := NormalizeName(rawName)
+	if err != nil {
+		return err
+	}
+	nameKey := NameKey(display)
+
+	// An existing IP takes precedence over any submitted-name conflict and
+	// must never mutate the stored row.
+	if _, err := m.store.GetKioskByIP(ctx, ip); err == nil {
+		return ErrAlreadyRegistered
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return m.logRegisterError(err, ip, display)
 	}
 
-	id := uuid.New()
-	held, err := m.store.NameHeldByOther(ctx, ip, name)
+	held, err := m.store.NameKeyHeldByOther(ctx, ip, nameKey)
 	if err != nil {
-		return m.logRegisterError(err, ip, name)
+		return m.logRegisterError(err, ip, display)
 	}
 	if held {
 		return ErrNameTaken
 	}
 
-	row, err := m.store.UpsertKiosk(ctx, database.UpsertKioskParams{ID: id, IP: ip, Name: name})
+	id := uuid.New()
+	row, err := m.store.CreateKiosk(ctx, database.CreateKioskParams{ID: id, IP: ip, Name: display, NameKey: nameKey})
 	if err != nil {
-		// A racing register may have claimed the name between the pre-check
-		// and the write; classify the failure through the store's domain
-		// answer instead of driver error codes.
-		held, lookupErr := m.store.NameHeldByOther(ctx, ip, name)
-		if lookupErr == nil && held {
+		// A racing register may have claimed the IP or the name key between
+		// the pre-checks and the write; classify the failure through the
+		// store's domain answers, IP first, instead of driver error codes.
+		if _, lookupErr := m.store.GetKioskByIP(ctx, ip); lookupErr == nil {
+			return ErrAlreadyRegistered
+		}
+		if held, lookupErr := m.store.NameKeyHeldByOther(ctx, ip, nameKey); lookupErr == nil && held {
 			return ErrNameTaken
 		}
-		return m.logRegisterError(err, ip, name)
+		return m.logRegisterError(err, ip, display)
 	}
 	m.logger.Info("kiosk registered", "kiosk_id", row.ID, "name", row.Name, "ip", row.IP)
 	return nil

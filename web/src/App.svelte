@@ -56,6 +56,14 @@
     broker.finishSigning();
   }
 
+  // The register response reported this kiosk is already registered (e.g. the
+  // original 204 was lost). Reopen the session immediately: the view moves
+  // through "connecting" and the greeting on the fresh socket supplies the
+  // authoritative kiosk name.
+  function handleAlreadyRegistered() {
+    broker.reopen();
+  }
+
   onMount(() => {
     broker = new BrokerConnection({
       url: `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`,
@@ -92,7 +100,10 @@
 {#if view === "install"}
   <AddToHomeScreen />
 {:else if view === "register"}
-  <Register />
+  <Register
+    onRegistered={() => location.reload()}
+    onAlreadyRegistered={handleAlreadyRegistered}
+  />
 {:else if view === "reconnecting"}
   <div
     class="flex min-h-svh flex-col items-center justify-center gap-2 bg-muted"
