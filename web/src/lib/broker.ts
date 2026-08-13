@@ -84,21 +84,25 @@ export class BrokerConnection {
   }
 
   private wire(socket: BrokerSocket): void {
+    // Events from a replaced socket must not drive the session: a socket
+    // torn down by reopen() (or superseded by a reconnect) may still fire a
+    // late close/message, so only the current socket is authoritative.
+    const isCurrent = () => this.socket === socket;
     socket.onopen = () => {
-      if (this.closed) return;
+      if (this.closed || !isCurrent()) return;
       // "connecting" persists until the greeting message arrives; nothing
       // to do here.
     };
     socket.onmessage = (ev) => {
-      if (this.closed) return;
+      if (this.closed || !isCurrent()) return;
       this.handleMessage(ev);
     };
     socket.onclose = () => {
-      if (this.closed) return;
+      if (this.closed || !isCurrent()) return;
       this.handleClose();
     };
     socket.onerror = () => {
-      if (this.closed) return;
+      if (this.closed || !isCurrent()) return;
       console.warn("broker: socket error");
     };
   }
@@ -224,5 +228,33 @@ export class BrokerConnection {
     const socket = this.socket;
     this.socket = null;
     socket?.close();
+  }
+
+  /**
+   * Immediately open a fresh session: tear down the current socket and any
+   * scheduled reconnect, then connect anew from "connecting". Used when the
+   * kiosk identity was just (re)established out-of-band, e.g. the register
+   * response reported the kiosk is already registered: the greeting on the
+   * new socket carries the authoritative name and replaces all stale state
+   * (the stored name is cleared so only the greeting controls it). The old
+   * socket is detached before close so its late events cannot race the new
+   * session. Safe to call any time before close().
+   */
+  reopen(): void {
+    if (this.closed) return;
+    this.reconnectTimer?.clear();
+    this.reconnectTimer = null;
+    const stale = this.socket;
+    this.socket = null;
+    stale?.close();
+    this.authenticated = false;
+    this.preGreetingRetries = 0;
+    this.kioskName = undefined;
+    this.signingUrl = undefined;
+    this.status = "connecting";
+    this.onChange({ status: "connecting" });
+    const socket = this.createSocket(this.url);
+    this.socket = socket;
+    this.wire(socket);
   }
 }

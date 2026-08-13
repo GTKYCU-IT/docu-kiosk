@@ -12,11 +12,53 @@ import (
 	"github.com/google/uuid"
 )
 
+const createKiosk = `-- name: CreateKiosk :one
+INSERT INTO kiosks (
+    id,
+    ip,
+    name,
+    name_key
+) VALUES (
+    ?,
+    ?,
+    ?,
+    ?
+)
+RETURNING id, ip, name, name_key, version
+`
+
+type CreateKioskParams struct {
+	ID      uuid.UUID
+	IP      string
+	Name    string
+	NameKey string
+}
+
+func (q *Queries) CreateKiosk(ctx context.Context, arg CreateKioskParams) (Kiosk, error) {
+	row := q.db.QueryRowContext(ctx, createKiosk,
+		arg.ID,
+		arg.IP,
+		arg.Name,
+		arg.NameKey,
+	)
+	var i Kiosk
+	err := row.Scan(
+		&i.ID,
+		&i.IP,
+		&i.Name,
+		&i.NameKey,
+		&i.Version,
+	)
+	return i, err
+}
+
 const getKioskByIP = `-- name: GetKioskByIP :one
 SELECT
     id,
     ip,
-    name
+    name,
+    name_key,
+    version
 FROM kiosks
 WHERE ip = ?
 `
@@ -24,7 +66,13 @@ WHERE ip = ?
 func (q *Queries) GetKioskByIP(ctx context.Context, ip string) (Kiosk, error) {
 	row := q.db.QueryRowContext(ctx, getKioskByIP, ip)
 	var i Kiosk
-	err := row.Scan(&i.ID, &i.IP, &i.Name)
+	err := row.Scan(
+		&i.ID,
+		&i.IP,
+		&i.Name,
+		&i.NameKey,
+		&i.Version,
+	)
 	return i, err
 }
 
@@ -32,7 +80,9 @@ const listKiosksByIDs = `-- name: ListKiosksByIDs :many
 SELECT
     id,
     ip,
-    name
+    name,
+    name_key,
+    version
 FROM kiosks
 WHERE id IN (/*SLICE:ids*/?)
 ORDER BY name
@@ -57,7 +107,13 @@ func (q *Queries) ListKiosksByIDs(ctx context.Context, ids []uuid.UUID) ([]Kiosk
 	var items []Kiosk
 	for rows.Next() {
 		var i Kiosk
-		if err := rows.Scan(&i.ID, &i.IP, &i.Name); err != nil {
+		if err := rows.Scan(
+			&i.ID,
+			&i.IP,
+			&i.Name,
+			&i.NameKey,
+			&i.Version,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -71,48 +127,22 @@ func (q *Queries) ListKiosksByIDs(ctx context.Context, ids []uuid.UUID) ([]Kiosk
 	return items, nil
 }
 
-const nameHeldByOther = `-- name: NameHeldByOther :one
+const nameKeyHeldByOther = `-- name: NameKeyHeldByOther :one
 SELECT EXISTS (
     SELECT 1
     FROM kiosks
-    WHERE ip != ?1 AND name = ?2
+    WHERE ip != ?1 AND name_key = ?2
 ) AS held
 `
 
-type NameHeldByOtherParams struct {
-	IP   string
-	Name string
+type NameKeyHeldByOtherParams struct {
+	IP      string
+	NameKey string
 }
 
-func (q *Queries) NameHeldByOther(ctx context.Context, arg NameHeldByOtherParams) (bool, error) {
-	row := q.db.QueryRowContext(ctx, nameHeldByOther, arg.IP, arg.Name)
+func (q *Queries) NameKeyHeldByOther(ctx context.Context, arg NameKeyHeldByOtherParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, nameKeyHeldByOther, arg.IP, arg.NameKey)
 	var held bool
 	err := row.Scan(&held)
 	return held, err
-}
-
-const upsertKiosk = `-- name: UpsertKiosk :one
-INSERT INTO kiosks (
-    id,
-    ip,
-    name
-) VALUES (
-    ?,
-    ?,
-    ?
-) ON CONFLICT(ip) DO UPDATE SET name = excluded.name
-RETURNING id, ip, name
-`
-
-type UpsertKioskParams struct {
-	ID   uuid.UUID
-	IP   string
-	Name string
-}
-
-func (q *Queries) UpsertKiosk(ctx context.Context, arg UpsertKioskParams) (Kiosk, error) {
-	row := q.db.QueryRowContext(ctx, upsertKiosk, arg.ID, arg.IP, arg.Name)
-	var i Kiosk
-	err := row.Scan(&i.ID, &i.IP, &i.Name)
-	return i, err
 }

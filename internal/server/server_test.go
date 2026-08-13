@@ -20,6 +20,7 @@ import (
 	"github.com/calvertjadon/docu-kiosk/internal/config"
 	"github.com/calvertjadon/docu-kiosk/internal/database"
 	"github.com/calvertjadon/docu-kiosk/internal/hub"
+	"github.com/calvertjadon/docu-kiosk/internal/kiosks"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/pressly/goose/v3"
@@ -47,7 +48,14 @@ func newTestDB(t *testing.T) *database.Queries {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	migrateTestDB(t, db)
+	return database.New(db)
+}
 
+// migrateTestDB applies the goose migrations and then the kiosk directory's
+// application backfill, mirroring the broker's production startup order.
+func migrateTestDB(t *testing.T, db *sql.DB) {
+	t.Helper()
 	_, file, _, _ := runtime.Caller(0)
 	migrationsDir := filepath.Join(filepath.Dir(file), "..", "..", "sql", "migrations")
 
@@ -58,8 +66,9 @@ func newTestDB(t *testing.T) *database.Queries {
 	if err := goose.Up(db, migrationsDir); err != nil {
 		t.Fatal(err)
 	}
-
-	return database.New(db)
+	if err := kiosks.Migrate(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func setupTestServer(t *testing.T) (*server, *httptest.Server) {
@@ -149,6 +158,123 @@ func connectWS(t *testing.T, ts *httptest.Server) (*websocket.Conn, string) {
 	return conn, msg.Name
 }
 
+// RFC 9457 problem type URNs for registration failures. The browser
+// classifier keys on the type member, so these strings are a stable contract.
+const (
+	problemAlreadyRegistered = "urn:docu-kiosk:problem:kiosk-already-registered"
+	problemNameConflict      = "urn:docu-kiosk:problem:kiosk-name-conflict"
+	problemInvalidName       = "urn:docu-kiosk:problem:invalid-kiosk-name"
+	problemMalformedRequest  = "urn:docu-kiosk:problem:malformed-request"
+	problemInternalError     = "urn:docu-kiosk:problem:internal-error"
+)
+
+// kioskSummary mirrors the GET /api/kiosks wire shape.
+type kioskSummary struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
+}
+
+// postKiosks POSTs a raw body to /api/kiosks from the given client IP and
+// returns the status and parsed problem envelope. A non-empty ip is sent as
+// X-Forwarded-For and requires the server to trust the direct peer. Every
+// failure response is verified to be an opaque application/problem+json
+// document.
+func postKiosks(t *testing.T, ts *httptest.Server, ip, body string) (int, problem) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/kiosks", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if ip != "" {
+		req.Header.Set("X-Forwarded-For", ip)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode == http.StatusNoContent {
+		return res.StatusCode, problem{}
+	}
+	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/problem+json") {
+		t.Errorf("Content-Type = %q, want application/problem+json", ct)
+	}
+	for _, leak := range []string{"sqlite", "constraint", "no rows"} {
+		if strings.Contains(strings.ToLower(string(data)), leak) {
+			t.Errorf("response leaks internal detail %q: %s", leak, data)
+		}
+	}
+	var p problem
+	if err := json.Unmarshal(data, &p); err != nil {
+		t.Fatalf("decode problem body %q: %v", data, err)
+	}
+	return res.StatusCode, p
+}
+
+// registerFromIP registers a kiosk by display name; see postKiosks for the
+// IP semantics.
+func registerFromIP(t *testing.T, ts *httptest.Server, ip, name string) (int, problem) {
+	t.Helper()
+	return postKiosks(t, ts, ip, fmt.Sprintf(`{"name":%q}`, name))
+}
+
+// assertProblem verifies a complete RFC 9457 problem response: the exact
+// machine-readable type URN, the matching HTTP status, and a non-empty
+// title.
+func assertProblem(t *testing.T, got problem, wantType string, wantStatus int) {
+	t.Helper()
+	if got.Type != wantType {
+		t.Errorf("problem type = %q, want %q", got.Type, wantType)
+	}
+	if got.Status != wantStatus {
+		t.Errorf("problem status = %d, want %d", got.Status, wantStatus)
+	}
+	if strings.TrimSpace(got.Title) == "" {
+		t.Errorf("problem title is empty for %s", wantType)
+	}
+	if got.Detail != "" && (strings.Contains(strings.ToLower(got.Detail), "sqlite") ||
+		strings.Contains(strings.ToLower(got.Detail), "constraint")) {
+		t.Errorf("problem detail leaks internals: %q", got.Detail)
+	}
+}
+
+// listKiosks GETs the live kiosk list.
+func listKiosks(t *testing.T, ts *httptest.Server) []kioskSummary {
+	t.Helper()
+	res, err := http.Get(ts.URL + "/api/kiosks")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer res.Body.Close()
+	var kiosks []kioskSummary
+	if err := json.NewDecoder(res.Body).Decode(&kiosks); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return kiosks
+}
+
+// setupTrustedProxyServer builds a test server that trusts its direct peer
+// (127.0.0.1), so X-Forwarded-For can impersonate additional client IPs.
+func setupTrustedProxyServer(t *testing.T) (*server, *httptest.Server) {
+	t.Helper()
+	db := newTestDB(t)
+	cfg := testConfig()
+	cfg.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}
+	s, err := NewServer(cfg, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.httpServer.Handler)
+	t.Cleanup(ts.Close)
+	return s, ts
+}
+
 // --- Registration ---
 
 func TestRegisterSuccess(t *testing.T) {
@@ -166,145 +292,287 @@ func TestRegisterSuccess(t *testing.T) {
 	}
 }
 
-func TestRegisterEmptyName(t *testing.T) {
-	_, ts := setupTestServer(t)
-
-	res, err := http.Post(ts.URL+"/api/kiosks", "application/json",
-		strings.NewReader(`{"name":""}`))
-	if err != nil {
-		t.Fatalf("post: %v", err)
+// TestRegisterInvalidName covers the name boundary failures: every rejected
+// name must produce 422 with the invalid-kiosk-name problem.
+func TestRegisterInvalidName(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "empty", body: `{"name":""}`},
+		{name: "whitespace only", body: `{"name":"   "}`},
+		{name: "unicode whitespace only", body: `{"name":"\u00a0\u2003"}`},
+		{name: "missing name field", body: `{}`},
+		{name: "embedded control char", body: `{"name":"lob\u001fby"}`},
+		{name: "embedded newline", body: `{"name":"lob\nby"}`},
+		{name: "65 code points", body: fmt.Sprintf(`{"name":%q}`, strings.Repeat("a", 65))},
+		{name: "65 multibyte code points", body: fmt.Sprintf(`{"name":%q}`, strings.Repeat("🧮", 65))},
+		{name: "over 64 after trim", body: fmt.Sprintf(`{"name":%q}`, " "+strings.Repeat("a", 65)+" ")},
 	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", res.StatusCode)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ts := setupTestServer(t)
+			status, p := postKiosks(t, ts, "", tc.body)
+			if status != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d", status)
+			}
+			assertProblem(t, p, problemInvalidName, http.StatusUnprocessableEntity)
+		})
 	}
 }
 
+// TestRegisterBadJSON verifies malformed request bodies produce the 400
+// malformed-request problem, not an internal-detail dump.
 func TestRegisterBadJSON(t *testing.T) {
-	_, ts := setupTestServer(t)
-
-	res, err := http.Post(ts.URL+"/api/kiosks", "application/json",
-		strings.NewReader("not json"))
-	if err != nil {
-		t.Fatalf("post: %v", err)
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "not json", body: "not json"},
+		{name: "empty body", body: ""},
+		{name: "truncated json", body: `{"name":"lobby"`},
+		{name: "wrong field type", body: `{"name":123}`},
 	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", res.StatusCode)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ts := setupTestServer(t)
+			status, p := postKiosks(t, ts, "", tc.body)
+			if status != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d", status)
+			}
+			assertProblem(t, p, problemMalformedRequest, http.StatusBadRequest)
+		})
 	}
 }
 
-func TestRegisterIdempotent(t *testing.T) {
+// TestRegisterAlreadyRegisteredSameName covers lost-registration-response
+// recovery: a kiosk that never saw its 204 retries the same name from the
+// same IP, receives kiosk-already-registered, and recovers by opening a
+// session whose greeting carries the authoritative name and identity.
+func TestRegisterAlreadyRegisteredSameName(t *testing.T) {
 	_, ts := setupTestServer(t)
 	registerKiosk(t, ts, "Lobby")
-	registerKiosk(t, ts, "Lobby")
 
+	status, p := registerFromIP(t, ts, "", "Lobby")
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", status)
+	}
+	assertProblem(t, p, problemAlreadyRegistered, http.StatusConflict)
+
+	// The retry created no second identity and changed nothing: the greeting
+	// still names the single original kiosk.
 	_, name := connectWS(t, ts)
 	if name != "Lobby" {
 		t.Errorf("expected greeting name Lobby, got %s", name)
 	}
-
-	res, err := http.Get(ts.URL + "/api/kiosks")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer res.Body.Close()
-
-	var kiosks []struct {
-		ID   uuid.UUID `json:"id"`
-		Name string    `json:"name"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&kiosks); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(kiosks) != 1 {
-		t.Fatalf("expected exactly 1 kiosk, got %d", len(kiosks))
-	}
-	if kiosks[0].Name != "Lobby" {
-		t.Errorf("expected name Lobby, got %s", kiosks[0].Name)
+	if kiosks := listKiosks(t, ts); len(kiosks) != 1 || kiosks[0].Name != "Lobby" {
+		t.Errorf("expected exactly one kiosk named Lobby, got %+v", kiosks)
 	}
 }
 
-func TestRegisterSameIPRenames(t *testing.T) {
+// TestRegisterSameIPCannotRename verifies that a fixed IP is bound to its
+// first identity: a different name from the same IP is rejected with
+// kiosk-already-registered and the stored identity — id, display name, and
+// greeting — is untouched.
+func TestRegisterSameIPCannotRename(t *testing.T) {
 	_, ts := setupTestServer(t)
 	registerKiosk(t, ts, "A")
-	registerKiosk(t, ts, "B")
 
 	_, name := connectWS(t, ts)
-	if name != "B" {
-		t.Errorf("expected greeting name B, got %s", name)
+	if name != "A" {
+		t.Errorf("expected greeting name A, got %s", name)
+	}
+	before := listKiosks(t, ts)
+	if len(before) != 1 || before[0].Name != "A" {
+		t.Fatalf("expected one kiosk named A, got %+v", before)
 	}
 
-	res, err := http.Get(ts.URL + "/api/kiosks")
-	if err != nil {
-		t.Fatalf("get: %v", err)
+	status, p := registerFromIP(t, ts, "", "B")
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", status)
 	}
-	defer res.Body.Close()
+	assertProblem(t, p, problemAlreadyRegistered, http.StatusConflict)
 
-	var kiosks []struct {
-		ID   uuid.UUID `json:"id"`
-		Name string    `json:"name"`
+	after := listKiosks(t, ts)
+	if len(after) != 1 || after[0].ID != before[0].ID || after[0].Name != "A" {
+		t.Errorf("identity changed after rejected rename: before %+v, after %+v", before, after)
 	}
-	if err := json.NewDecoder(res.Body).Decode(&kiosks); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(kiosks) != 1 {
-		t.Fatalf("expected exactly 1 kiosk, got %d", len(kiosks))
-	}
-	if kiosks[0].Name != "B" {
-		t.Errorf("expected name B, got %s", kiosks[0].Name)
+	_, name = connectWS(t, ts)
+	if name != "A" {
+		t.Errorf("expected greeting name A after rejected rename, got %s", name)
 	}
 }
 
+// TestRegisterNameConflictDifferentIP verifies global uniqueness under full
+// Unicode case folding: a folded-equivalent name from a different IP is
+// rejected with kiosk-name-conflict, and the failed attempt registers
+// nothing.
 func TestRegisterNameConflictDifferentIP(t *testing.T) {
-	db := newTestDB(t)
-	cfg := testConfig()
-	cfg.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}
-	s, err := NewServer(cfg, db)
+	tests := []struct {
+		name        string
+		first, fold string
+	}{
+		{name: "ascii case fold", first: "Lobby", fold: "lobby"},
+		{name: "unicode case fold", first: "Straße", fold: "STRASSE"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ts := setupTrustedProxyServer(t)
+
+			if status, p := registerFromIP(t, ts, "", tc.first); status != http.StatusNoContent {
+				t.Fatalf("register %q: expected 204, got %d (%+v)", tc.first, status, p)
+			}
+
+			status, p := registerFromIP(t, ts, "10.0.0.2", tc.fold)
+			if status != http.StatusConflict {
+				t.Fatalf("register %q from another IP: expected 409, got %d", tc.fold, status)
+			}
+			assertProblem(t, p, problemNameConflict, http.StatusConflict)
+
+			// The foreign IP stayed unregistered: it can still claim a fresh
+			// identity.
+			if status, p := registerFromIP(t, ts, "10.0.0.2", "Fresh"); status != http.StatusNoContent {
+				t.Fatalf("expected 204 for fresh identity, got %d (%+v)", status, p)
+			}
+		})
+	}
+}
+
+// TestRegisterIPConflictTakesPrecedence: when a registered IP submits a name
+// held by another identity, the IP conflict wins and neither row changes.
+func TestRegisterIPConflictTakesPrecedence(t *testing.T) {
+	_, ts := setupTrustedProxyServer(t)
+	if status, p := registerFromIP(t, ts, "", "Lobby"); status != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d (%+v)", status, p)
+	}
+	if status, p := registerFromIP(t, ts, "10.0.0.2", "Front"); status != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d (%+v)", status, p)
+	}
+
+	status, p := registerFromIP(t, ts, "", "Front")
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", status)
+	}
+	assertProblem(t, p, problemAlreadyRegistered, http.StatusConflict)
+
+	// The first identity is untouched: greeting still Lobby.
+	_, name := connectWS(t, ts)
+	if name != "Lobby" {
+		t.Errorf("expected greeting name Lobby, got %s", name)
+	}
+	// The second identity is untouched: its name is still held by another
+	// identity, and its IP stays bound — any further registration from it is
+	// rejected as already registered rather than creating a new row.
+	if status, p := registerFromIP(t, ts, "10.0.0.3", "Front"); status != http.StatusConflict {
+		t.Fatalf("expected 409, got %d (%+v)", status, p)
+	} else {
+		assertProblem(t, p, problemNameConflict, http.StatusConflict)
+	}
+	if status, p := registerFromIP(t, ts, "10.0.0.2", "Back"); status != http.StatusConflict {
+		t.Fatalf("expected 409 for a bound IP, got %d (%+v)", status, p)
+	} else {
+		assertProblem(t, p, problemAlreadyRegistered, http.StatusConflict)
+	}
+}
+
+// TestRegisterNameNormalization covers the shared Unicode name boundary as
+// observed over HTTP: surrounding Unicode whitespace is trimmed, the stored
+// display form is NFC, and display casing is preserved.
+func TestRegisterNameNormalization(t *testing.T) {
+	t.Run("trims surrounding unicode whitespace", func(t *testing.T) {
+		_, ts := setupTestServer(t)
+		status, p := registerFromIP(t, ts, "", "\u00a0Lobby\u2003")
+		if status != http.StatusNoContent {
+			t.Fatalf("expected 204, got %d (%+v)", status, p)
+		}
+		_, name := connectWS(t, ts)
+		if name != "Lobby" {
+			t.Errorf("stored display name = %q, want trimmed %q", name, "Lobby")
+		}
+	})
+
+	t.Run("stores NFC display form", func(t *testing.T) {
+		_, ts := setupTrustedProxyServer(t)
+		// NFD input is stored as NFC.
+		if status, p := registerFromIP(t, ts, "", "cafe\u0301"); status != http.StatusNoContent {
+			t.Fatalf("expected 204, got %d (%+v)", status, p)
+		}
+		_, name := connectWS(t, ts)
+		if want := "caf\u00e9"; name != want {
+			t.Errorf("stored display name = %q, want NFC %q", name, want)
+		}
+		// The NFC spelling from another IP collides on the folded key.
+		status, p := registerFromIP(t, ts, "10.0.0.2", "caf\u00e9")
+		if status != http.StatusConflict {
+			t.Fatalf("expected 409, got %d", status)
+		}
+		assertProblem(t, p, problemNameConflict, http.StatusConflict)
+	})
+
+	t.Run("preserves display casing", func(t *testing.T) {
+		_, ts := setupTestServer(t)
+		if status, p := registerFromIP(t, ts, "", "LoBBy"); status != http.StatusNoContent {
+			t.Fatalf("expected 204, got %d (%+v)", status, p)
+		}
+		_, name := connectWS(t, ts)
+		if name != "LoBBy" {
+			t.Errorf("stored display name = %q, want submitted casing %q", name, "LoBBy")
+		}
+	})
+}
+
+// TestRegisterNameBoundaries pins the valid side of the 1–64 Unicode code
+// point boundary; each case uses a fresh server so every registration is a
+// genuinely new identity.
+func TestRegisterNameBoundaries(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "single code point", body: `{"name":"a"}`},
+		{name: "single multibyte code point", body: `{"name":"🧮"}`},
+		{name: "64 code points", body: fmt.Sprintf(`{"name":%q}`, strings.Repeat("a", 64))},
+		{name: "64 multibyte code points", body: fmt.Sprintf(`{"name":%q}`, strings.Repeat("🧮", 64))},
+		{name: "64 after trim", body: fmt.Sprintf(`{"name":%q}`, " "+strings.Repeat("a", 64)+" ")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ts := setupTestServer(t)
+			status, p := postKiosks(t, ts, "", tc.body)
+			if status != http.StatusNoContent {
+				t.Fatalf("expected 204, got %d (%+v)", status, p)
+			}
+		})
+	}
+}
+
+// TestRegisterInternalErrorIsOpaque verifies the internal-error problem is
+// still a complete, opaque RFC 9457 document when persistence fails.
+func TestRegisterInternalErrorIsOpaque(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	migrateTestDB(t, db)
+
+	s, err := NewServer(testConfig(), database.New(db))
 	if err != nil {
 		t.Fatal(err)
 	}
 	ts := httptest.NewServer(s.httpServer.Handler)
 	t.Cleanup(ts.Close)
 
-	registerKiosk(t, ts, "Lobby")
-
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/kiosks",
-		strings.NewReader(`{"name":"Lobby"}`))
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
-	req.Header.Set("X-Forwarded-For", "10.0.0.2")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusConflict {
-		t.Fatalf("expected 409, got %d", res.StatusCode)
+	// Break persistence beneath the handler so Register hits a real error.
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
 	}
 
-	data, err := io.ReadAll(res.Body)
-	if err != nil {
-		t.Fatalf("read body: %v", err)
+	status, p := postKiosks(t, ts, "", `{"name":"lobby"}`)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", status)
 	}
-	var body struct {
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(data, &body); err != nil {
-		t.Fatalf("decode body %q: %v", data, err)
-	}
-	if body.Error != "kiosk name already in use" {
-		t.Errorf("body error = %q, want %q", body.Error, "kiosk name already in use")
-	}
-	for _, leak := range []string{"sqlite", "constraint"} {
-		if strings.Contains(string(data), leak) {
-			t.Errorf("body leaks internal detail %q: %s", leak, data)
-		}
-	}
+	assertProblem(t, p, problemInternalError, http.StatusInternalServerError)
 }
 
 // --- List kiosks ---

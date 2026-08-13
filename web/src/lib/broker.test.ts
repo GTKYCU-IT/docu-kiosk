@@ -261,4 +261,151 @@ describe("BrokerConnection", () => {
       { status: "ready", kioskName: "lobby-1" },
     ]);
   });
+
+  it("recovers from unregistered via reopen and adopts the authoritative greeting name", () => {
+    const { sockets, states, conn } = makeHarness();
+    // Exhaust the pre-greeting retry budget: unregistered, no pending retry.
+    sockets[0].closeFromServer();
+    vi.advanceTimersByTime(1000);
+    sockets[1].closeFromServer();
+    vi.advanceTimersByTime(1000);
+    sockets[2].closeFromServer();
+    vi.advanceTimersByTime(1000);
+    sockets[3].closeFromServer();
+    expect(states).toEqual([{ status: "unregistered" }]);
+    expect(sockets).toHaveLength(4);
+
+    // Recovery reconnect: fresh session from "connecting" on a new socket.
+    conn.reopen();
+    expect(states).toEqual([
+      { status: "unregistered" },
+      { status: "connecting" },
+    ]);
+    expect(sockets).toHaveLength(5);
+    expect(sockets[4].closed).toBe(false);
+
+    // The greeting on the new socket is the only source of the kiosk name.
+    sockets[4].message(greeting("lobby-recovered"));
+    expect(states).toEqual([
+      { status: "unregistered" },
+      { status: "connecting" },
+      { status: "ready", kioskName: "lobby-recovered" },
+    ]);
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(5);
+  });
+
+  it("reopen cancels a pending reconnect retry", () => {
+    const { sockets, states, conn } = makeHarness();
+    sockets[0].message(greeting("lobby-1"));
+    sockets[0].closeFromServer(); // schedules the retry
+    expect(states).toEqual([
+      { status: "ready", kioskName: "lobby-1" },
+      { status: "reconnecting", kioskName: "lobby-1" },
+    ]);
+
+    conn.reopen(); // before the retry fires
+    expect(states).toEqual([
+      { status: "ready", kioskName: "lobby-1" },
+      { status: "reconnecting", kioskName: "lobby-1" },
+      { status: "connecting" },
+    ]);
+    expect(sockets).toHaveLength(2); // fresh socket created immediately
+
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(2); // the cancelled retry never fires
+
+    sockets[1].message(greeting("lobby-1"));
+    expect(states).toEqual([
+      { status: "ready", kioskName: "lobby-1" },
+      { status: "reconnecting", kioskName: "lobby-1" },
+      { status: "connecting" },
+      { status: "ready", kioskName: "lobby-1" },
+    ]);
+  });
+
+  it("reopen cancels a pending pre-greeting retry", () => {
+    const { sockets, states, conn } = makeHarness();
+    sockets[0].closeFromServer(); // pre-greeting retry scheduled
+    expect(states).toEqual([]);
+
+    conn.reopen();
+    expect(states).toEqual([{ status: "connecting" }]);
+    expect(sockets).toHaveLength(2);
+
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(2); // the old retry chain is gone
+
+    sockets[1].message(greeting("lobby-1"));
+    expect(states).toEqual([
+      { status: "connecting" },
+      { status: "ready", kioskName: "lobby-1" },
+    ]);
+  });
+
+  it("ignores late events from a socket superseded by reopen", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { sockets, states, conn } = makeHarness();
+    sockets[0].message(greeting("lobby-1"));
+    conn.reopen();
+    expect(states).toEqual([
+      { status: "ready", kioskName: "lobby-1" },
+      { status: "connecting" },
+    ]);
+
+    // The browser may still fire message/close/error on the torn-down
+    // socket; none of it may drive the fresh session.
+    sockets[0].message(greeting("stale-name"));
+    sockets[0].onclose?.();
+    sockets[0].error();
+    expect(warn).not.toHaveBeenCalled();
+    expect(states).toEqual([
+      { status: "ready", kioskName: "lobby-1" },
+      { status: "connecting" },
+    ]);
+
+    sockets[1].message(greeting("authoritative-name"));
+    expect(states).toEqual([
+      { status: "ready", kioskName: "lobby-1" },
+      { status: "connecting" },
+      { status: "ready", kioskName: "authoritative-name" },
+    ]);
+  });
+
+  it("ignores late events from a socket superseded by a scheduled reconnect", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { sockets, states } = makeHarness();
+    sockets[0].message(greeting("lobby-1"));
+    sockets[0].closeFromServer();
+    vi.advanceTimersByTime(1000);
+    expect(sockets).toHaveLength(2);
+
+    sockets[0].message(greeting("stale-name"));
+    sockets[0].onclose?.();
+    sockets[0].error();
+    expect(warn).not.toHaveBeenCalled();
+    expect(states).toEqual([
+      { status: "ready", kioskName: "lobby-1" },
+      { status: "reconnecting", kioskName: "lobby-1" },
+    ]);
+
+    sockets[1].message(greeting("lobby-1"));
+    expect(states).toEqual([
+      { status: "ready", kioskName: "lobby-1" },
+      { status: "reconnecting", kioskName: "lobby-1" },
+      { status: "ready", kioskName: "lobby-1" },
+    ]);
+  });
+
+  it("reopen after close is a no-op", () => {
+    const { sockets, states, conn } = makeHarness();
+    conn.close();
+    expect(sockets[0].closed).toBe(true);
+
+    conn.reopen();
+    expect(states).toEqual([]);
+    expect(sockets).toHaveLength(1);
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(1);
+  });
 });
