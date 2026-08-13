@@ -1,3 +1,5 @@
+import { parse, type Message } from "./protocol";
+
 export type BrokerStatus =
   | "connecting" // socket opening/opened; greeting not yet received
   | "unregistered" // socket closed before any greeting
@@ -107,35 +109,29 @@ export class BrokerConnection {
 
   private handleMessage(ev: MessageEvent): void {
     const rawData: string = ev.data;
-    let parsed: unknown;
+    let message: Message;
     try {
-      parsed = JSON.parse(rawData);
+      message = parse(rawData);
     } catch {
+      // Decoder boundary: malformed JSON, unknown types, and bad fields all
+      // surface here, so one catch warns and drops without touching state.
       this.drop("malformed message", rawData);
       return;
     }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      this.drop("unknown message", parsed);
-      return;
-    }
-    const record = parsed as Record<string, unknown>;
-    if (record.type === "connected") {
-      if (typeof record.name === "string") {
-        this.handleConnected(record.name);
-      } else {
-        this.drop("malformed connected message", record);
+    switch (message.type) {
+      case "connected":
+        this.handleConnected(message.name);
+        return;
+      case "sign":
+        this.handleSign(message.url);
+        return;
+      default: {
+        // Exhaustiveness guard: extending Message without a dispatch case
+        // above makes this assignment fail to compile.
+        const unreachable: never = message;
+        return unreachable;
       }
-      return;
     }
-    if (record.type === "sign") {
-      if (typeof record.url === "string") {
-        this.handleSign(record.url);
-      } else {
-        this.drop("malformed sign message", record);
-      }
-      return;
-    }
-    this.drop("unknown message", record);
   }
 
   private handleConnected(name: string): void {

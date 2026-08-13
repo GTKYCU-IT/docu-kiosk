@@ -19,7 +19,8 @@ import (
 // Wire message shapes. The broker is the only sender: a greeting is written
 // when a kiosk connects, and sign instructions are pushed on demand. The
 // field order below is the wire order, so it must not change without a
-// coordinated browser-client update (web/src/lib/broker.ts).
+// coordinated browser-client update (web/src/lib/protocol.ts, the manual
+// mirror of these shapes).
 type greeting struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
