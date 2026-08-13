@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -213,11 +214,19 @@ func TestValidateRejectsForgedToken(t *testing.T) {
 
 // fakeStore is a scriptable store for AuthModule tests. Every store method is
 // implemented explicitly — no nil interface promotion — so a test reaches a
-// method only by stubbing it. The seam methods (GetUserByUsername,
-// GetRefreshToken, MakeRefreshToken, RevokeRefreshToken) carry scripted
-// results per scenario; GetUser fails loudly and intentionally, so any test
-// that drives it must replace the stub.
+// method only by stubbing it. The seam methods (CountUsers, CreateUser,
+// GetUserByUsername, GetRefreshToken, MakeRefreshToken, RevokeRefreshToken)
+// carry scripted results per scenario; GetUser fails loudly and intentionally,
+// so any test that drives it must replace the stub. CreateUser records its
+// calls so tests can prove no downstream creation happens on skipped, invalid,
+// or error paths.
 type fakeStore struct {
+	countUsers          int64
+	countUsersErr       error
+	createdUser         database.User
+	createUserErr       error
+	createCalls         int
+	createdParams       database.CreateUserParams
 	userByUsername      database.User
 	userByUsernameErr   error
 	refreshToken        database.RefreshToken
@@ -225,6 +234,16 @@ type fakeStore struct {
 	makeRefreshToken    database.RefreshToken
 	makeRefreshTokenErr error
 	revokeErr           error
+}
+
+func (f *fakeStore) CountUsers(_ context.Context) (int64, error) {
+	return f.countUsers, f.countUsersErr
+}
+
+func (f *fakeStore) CreateUser(_ context.Context, arg database.CreateUserParams) (database.User, error) {
+	f.createCalls++
+	f.createdParams = arg
+	return f.createdUser, f.createUserErr
 }
 
 func (f *fakeStore) GetUser(_ context.Context, _ uuid.UUID) (database.User, error) {
@@ -291,5 +310,127 @@ func TestRotateRefreshStoreLookupFailureMapsToInvalidToken(t *testing.T) {
 
 	if _, _, err := module.RotateRefresh(context.Background(), "some-token"); !errors.Is(err, ErrInvalidRefreshToken) {
 		t.Errorf("expected ErrInvalidRefreshToken, got %v", err)
+	}
+}
+
+// When users already exist, EnsureAdminUser must be a no-op: even missing
+// credentials are ignored (the count is consulted before any validation), and
+// nothing is created.
+func TestEnsureAdminUserSkipsWhenUsersExist(t *testing.T) {
+	fs := &fakeStore{countUsers: 1}
+	module := newFakeModule(fs)
+
+	if err := module.EnsureAdminUser("", ""); err != nil {
+		t.Fatalf("expected no-op for existing users, got %v", err)
+	}
+	if fs.createCalls != 0 {
+		t.Errorf("expected no creation when users exist, got %d CreateUser calls", fs.createCalls)
+	}
+}
+
+// On an empty table, EnsureAdminUser must create a UUID-backed user whose
+// stored password is a verifiable hash of the supplied one.
+func TestEnsureAdminUserCreatesUserWithHash(t *testing.T) {
+	fs := &fakeStore{}
+	module := newFakeModule(fs)
+
+	if err := module.EnsureAdminUser("admin", "correct horse"); err != nil {
+		t.Fatal(err)
+	}
+	if fs.createCalls != 1 {
+		t.Fatalf("expected exactly one CreateUser call, got %d", fs.createCalls)
+	}
+	if fs.createdParams.Username != "admin" {
+		t.Errorf("created username = %q, want admin", fs.createdParams.Username)
+	}
+	if fs.createdParams.ID == uuid.Nil {
+		t.Error("created user has empty UUID")
+	}
+	if fs.createdParams.Password == "correct horse" {
+		t.Error("stored password must be hashed, not plaintext")
+	}
+	if !CheckPasswordHash("correct horse", fs.createdParams.Password) {
+		t.Error("stored password does not verify against the supplied password")
+	}
+}
+
+// An empty table with missing credentials must fail before any creation.
+func TestEnsureAdminUserRejectsMissingCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		username string
+		password string
+	}{
+		{name: "empty username", username: "", password: "correct horse"},
+		{name: "empty password", username: "admin", password: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := &fakeStore{}
+			module := newFakeModule(fs)
+
+			err := module.EnsureAdminUser(tc.username, tc.password)
+			if err == nil {
+				t.Fatal("expected error for missing credentials")
+			}
+			if !strings.Contains(err.Error(), "AUTH_USERNAME") || !strings.Contains(err.Error(), "AUTH_PASSWORD") {
+				t.Errorf("error %q does not name the required AUTH_USERNAME/AUTH_PASSWORD variables", err)
+			}
+			if fs.createCalls != 0 {
+				t.Errorf("expected no creation on missing credentials, got %d CreateUser calls", fs.createCalls)
+			}
+		})
+	}
+}
+
+// An empty table with a password shorter than 8 characters must fail before
+// any creation.
+func TestEnsureAdminUserRejectsShortPassword(t *testing.T) {
+	fs := &fakeStore{}
+	module := newFakeModule(fs)
+
+	err := module.EnsureAdminUser("admin", "short7")
+	if err == nil {
+		t.Fatal("expected error for short password")
+	}
+	if !strings.Contains(err.Error(), "at least 8 characters") {
+		t.Errorf("error %q does not state the 8-character minimum", err)
+	}
+	if fs.createCalls != 0 {
+		t.Errorf("expected no creation for short password, got %d CreateUser calls", fs.createCalls)
+	}
+}
+
+// A failure while counting users must surface as a wrapped error carrying the
+// operation context, and must prevent any creation.
+func TestEnsureAdminUserCountFailureIsWrapped(t *testing.T) {
+	storeErr := errors.New("database unavailable")
+	fs := &fakeStore{countUsersErr: storeErr}
+	module := newFakeModule(fs)
+
+	err := module.EnsureAdminUser("admin", "correct horse")
+	if !errors.Is(err, storeErr) {
+		t.Fatalf("expected wrapped count error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "count users") {
+		t.Errorf("error %q does not carry count context", err)
+	}
+	if fs.createCalls != 0 {
+		t.Errorf("expected no creation on count failure, got %d CreateUser calls", fs.createCalls)
+	}
+}
+
+// A failure while persisting the admin user must surface as a wrapped error
+// carrying the operation context.
+func TestEnsureAdminUserCreateFailureIsWrapped(t *testing.T) {
+	storeErr := errors.New("disk full")
+	fs := &fakeStore{createUserErr: storeErr}
+	module := newFakeModule(fs)
+
+	err := module.EnsureAdminUser("admin", "correct horse")
+	if !errors.Is(err, storeErr) {
+		t.Fatalf("expected wrapped create error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "create admin user") {
+		t.Errorf("error %q does not carry create context", err)
 	}
 }

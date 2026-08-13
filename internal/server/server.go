@@ -3,7 +3,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -82,34 +81,10 @@ func (s *server) realIP(r *http.Request) string {
 	return peer
 }
 
-func (s *server) ensureAdminUser(username, password string) error {
-	if username == "" || password == "" {
-		return errors.New("AUTH_USERNAME and AUTH_PASSWORD are required on first boot (users table is empty)")
-	}
-	if len(password) < 8 {
-		return errors.New("AUTH_PASSWORD must be at least 8 characters")
-	}
-
-	hash, err := auth.HashPassword(password)
-	if err != nil {
-		return fmt.Errorf("hash password: %w", err)
-	}
-
-	if _, err := s.db.CreateUser(context.Background(), database.CreateUserParams{
-		ID:       uuid.New(),
-		Username: username,
-		Password: hash,
-	}); err != nil {
-		return fmt.Errorf("create admin user: %w", err)
-	}
-
-	s.logger.Info("created admin user", "username", username)
-	return nil
-}
-
 // NewServer builds the broker: routes, middleware chain, and the admin-user
-// bootstrap. The admin user is only created when the users table is empty, so
-// existing credentials are never silently reset.
+// bootstrap. The AuthModule owns the first-boot policy (creating the admin
+// user only when the users table is empty), so existing credentials are never
+// silently reset.
 func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 	logger := newLogger(cfg.LogLevel)
 	if len(cfg.TrustedProxies) == 0 {
@@ -136,17 +111,8 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 		trustedProxies: cfg.TrustedProxies,
 	}
 
-	count, err := db.CountUsers(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("count users: %w", err)
-	}
-	if count == 0 {
-		s.logger.Info("users table is empty — bootstrapping admin user")
-		if err := s.ensureAdminUser(cfg.AdminUsername, cfg.AdminPassword); err != nil {
-			return nil, err
-		}
-	} else {
-		s.logger.Info("users table already has users — skipping admin bootstrap")
+	if err := authModule.EnsureAdminUser(cfg.AdminUsername, cfg.AdminPassword); err != nil {
+		return nil, fmt.Errorf("ensure admin user: %w", err)
 	}
 
 	mux := http.NewServeMux()
