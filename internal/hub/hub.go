@@ -388,17 +388,19 @@ func (h *Hub) teardownSession(id uuid.UUID, c conn) {
 // logged so the broker's view of the kiosk state stays traceable.
 func (h *Hub) updateStatus(id uuid.UUID, c conn, st Status) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	idn, ok := h.identities[id]
 	if !ok {
+		h.mu.Unlock()
 		h.logger.Info("kiosk status ignored: no live session", "kiosk_id", id)
 		return
 	}
 	if idn.conn != c {
+		h.mu.Unlock()
 		h.logger.Info("kiosk status ignored: stale generation", "kiosk_id", id)
 		return
 	}
 	idn.status = st
+	h.mu.Unlock()
 }
 
 // PushSign instructs a connected kiosk to open a signing session at url.
