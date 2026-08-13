@@ -29,7 +29,7 @@ import (
 type kioskHub interface {
 	Serve(w http.ResponseWriter, r *http.Request, kioskIP string)
 	PushSign(ctx context.Context, id uuid.UUID, url string) error
-	Connected() []uuid.UUID
+	Statuses() map[uuid.UUID]hub.Status
 }
 
 type server struct {

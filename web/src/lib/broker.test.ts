@@ -7,9 +7,15 @@ class FakeSocket implements BrokerSocket {
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
   closed = false;
+  // Client-origin frames (kiosk -> broker), in send order.
+  sent: string[] = [];
 
   open(): void {
     this.onopen?.();
+  }
+
+  send(data: string): void {
+    this.sent.push(data);
   }
 
   message(data: string): void {
@@ -407,5 +413,106 @@ describe("BrokerConnection", () => {
     expect(sockets).toHaveLength(1);
     vi.advanceTimersByTime(60_000);
     expect(sockets).toHaveLength(1);
+  });
+
+  it("sends the ready status frame as the first client frame after the greeting", () => {
+    const { sockets } = makeHarness();
+    expect(sockets[0].sent).toEqual([]);
+    sockets[0].message(greeting("lobby-1"));
+    expect(sockets[0].sent).toEqual(['{"type":"status","status":"ready"}']);
+  });
+
+  it("reports every ready/signing transition on the live socket", () => {
+    const { sockets, conn } = makeHarness();
+    sockets[0].message(greeting("lobby-1"));
+    sockets[0].message(sign("https://sign.example/abc"));
+    conn.finishSigning();
+    expect(sockets[0].sent).toEqual([
+      '{"type":"status","status":"ready"}',
+      '{"type":"status","status":"signing"}',
+      '{"type":"status","status":"ready"}',
+    ]);
+  });
+
+  it("sends nothing before the greeting, even on a pre-greeting sign", () => {
+    const { sockets, states } = makeHarness();
+    // A sign arriving before the greeting still notifies the view (inbound
+    // behavior unchanged) but cannot emit a client frame yet.
+    sockets[0].message(sign("https://sign.example/abc"));
+    expect(sockets[0].sent).toEqual([]);
+    expect(states).toEqual([
+      { status: "signing", signingUrl: "https://sign.example/abc" },
+    ]);
+    // The greeting then unlocks the initial frame, reporting the live state.
+    sockets[0].message(greeting("lobby-1"));
+    expect(sockets[0].sent).toEqual(['{"type":"status","status":"signing"}']);
+  });
+
+  it("reports signing on the replacement generation when reconnecting during an active signing session", () => {
+    const { sockets, states } = makeHarness();
+    sockets[0].message(greeting("lobby-1"));
+    sockets[0].message(sign("https://sign.example/abc"));
+    sockets[0].closeFromServer();
+    vi.advanceTimersByTime(1000);
+    expect(sockets).toHaveLength(2);
+    expect(sockets[1].sent).toEqual([]);
+    sockets[1].message(greeting("lobby-1"));
+    expect(sockets[1].sent).toEqual(['{"type":"status","status":"signing"}']);
+    // No new state notification: the view stayed "signing" throughout.
+    expect(states).toEqual([
+      { status: "ready", kioskName: "lobby-1" },
+      { status: "signing", kioskName: "lobby-1", signingUrl: "https://sign.example/abc" },
+    ]);
+  });
+
+  it("reports ready on the replacement generation after a plain reconnect", () => {
+    const { sockets } = makeHarness();
+    sockets[0].message(greeting("lobby-1"));
+    sockets[0].closeFromServer();
+    vi.advanceTimersByTime(1000);
+    expect(sockets).toHaveLength(2);
+    sockets[1].message(greeting("lobby-1"));
+    expect(sockets[1].sent).toEqual(['{"type":"status","status":"ready"}']);
+  });
+
+  it("does not send from a socket superseded by a scheduled reconnect", () => {
+    const { sockets } = makeHarness();
+    sockets[0].message(greeting("lobby-1"));
+    sockets[0].closeFromServer();
+    vi.advanceTimersByTime(1000);
+    expect(sockets).toHaveLength(2);
+    sockets[0].message(greeting("stale-name"));
+    expect(sockets[0].sent).toEqual(['{"type":"status","status":"ready"}']);
+    expect(sockets[1].sent).toEqual([]);
+  });
+
+  it("does not send from a socket superseded by reopen", () => {
+    const { sockets, conn } = makeHarness();
+    sockets[0].message(greeting("lobby-1"));
+    conn.reopen();
+    sockets[0].message(greeting("stale-name"));
+    // Only the frame from its own generation; the stale greeting added none.
+    expect(sockets[0].sent).toEqual(['{"type":"status","status":"ready"}']);
+    sockets[1].message(greeting("authoritative-name"));
+    expect(sockets[1].sent).toEqual(['{"type":"status","status":"ready"}']);
+  });
+
+  it("sends nothing while the socket is down or after close", () => {
+    const { sockets, conn } = makeHarness();
+    sockets[0].message(greeting("lobby-1"));
+    sockets[0].message(sign("https://sign.example/abc"));
+    sockets[0].closeFromServer();
+    conn.finishSigning(); // socket down: transition reported, no frame
+    expect(sockets[0].sent).toEqual([
+      '{"type":"status","status":"ready"}',
+      '{"type":"status","status":"signing"}',
+    ]);
+    conn.close();
+    conn.finishSigning();
+    sockets[0].message(greeting("lobby-1"));
+    expect(sockets[0].sent).toEqual([
+      '{"type":"status","status":"ready"}',
+      '{"type":"status","status":"signing"}',
+    ]);
   });
 });

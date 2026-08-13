@@ -16,11 +16,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// Wire message shapes. The broker is the only sender: a greeting is written
-// when a kiosk connects, and sign instructions are pushed on demand. The
-// field order below is the wire order, so it must not change without a
-// coordinated browser-client update (web/src/lib/protocol.ts, the manual
-// mirror of these shapes).
+// Wire message shapes. Broker-to-kiosk messages are a greeting, written when
+// a kiosk connects, and sign instructions, pushed on demand. Kiosk-to-broker
+// messages are status frames: the kiosk's first frame after the greeting,
+// then one frame after each ready/signing transition. The field order below
+// is the wire order, so it must not change without a coordinated
+// browser-client update (web/src/lib/protocol.ts, the manual mirror of these
+// shapes).
 type greeting struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
@@ -37,6 +39,50 @@ type sign struct {
 
 func newSign(url string) sign {
 	return sign{Type: "sign", URL: url}
+}
+
+// Status is the broker-observed state of a published kiosk session. Absence
+// from the Statuses snapshot means the kiosk is Offline (no live session) or
+// uninitialized (a live session that has not completed the status
+// handshake).
+type Status string
+
+const (
+	// StatusReady marks a kiosk with a live session and no signing session.
+	StatusReady Status = "ready"
+	// StatusSigning marks a kiosk with a live session inside a signing flow.
+	StatusSigning Status = "signing"
+)
+
+// statusFrame is the kiosk-to-broker status message: the first client frame
+// of every connection and one frame after each ready/signing transition. It
+// is the only message the kiosk sends; decodeStatusFrame is its single
+// decode path.
+type statusFrame struct {
+	Type   string `json:"type"`
+	Status string `json:"status"`
+}
+
+// decodeStatusFrame decodes a kiosk-to-broker status frame. It accepts
+// exactly the ready and signing status values; malformed JSON, a non-status
+// type, or a missing or unknown status value is rejected. A rejected initial
+// frame ends the session instead of publishing it.
+func decodeStatusFrame(data []byte) (Status, error) {
+	var f statusFrame
+	if err := json.Unmarshal(data, &f); err != nil {
+		return "", fmt.Errorf("decode status frame: %w", err)
+	}
+	if f.Type != "status" {
+		return "", fmt.Errorf("decode status frame: expected type status, got %q", f.Type)
+	}
+	switch Status(f.Status) {
+	case StatusReady:
+		return StatusReady, nil
+	case StatusSigning:
+		return StatusSigning, nil
+	default:
+		return "", fmt.Errorf("decode status frame: unknown status %q", f.Status)
+	}
 }
 
 // marshal is the single wire-marshal path for kiosk messages. All messages
@@ -90,6 +136,12 @@ type Hub struct {
 	originPolicy OriginPolicy
 	mu           sync.Mutex
 	identities   map[uuid.UUID]*identity
+	// statuses holds the reported status of every identity whose live
+	// session completed the status handshake, guarded by the same mutex as
+	// identities so publication, teardown, and the Statuses snapshot observe
+	// the session set and its statuses atomically. An identity absent from
+	// this map is Offline or uninitialized.
+	statuses     map[uuid.UUID]Status
 	pingInterval time.Duration
 	pingTimeout  time.Duration
 }
@@ -118,6 +170,7 @@ func New(store KioskStore, logger *slog.Logger, opts ...Option) *Hub {
 		store:        store,
 		logger:       logger,
 		identities:   make(map[uuid.UUID]*identity),
+		statuses:     make(map[uuid.UUID]Status),
 		pingInterval: 30 * time.Second,
 		pingTimeout:  5 * time.Second,
 	}
@@ -169,8 +222,13 @@ func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, kioskIP string) {
 	h.runSession(r.Context(), k, c)
 }
 
-// runSession drives one kiosk connection through register, greeting, ping, and
-// read, cleaning up the session on exit.
+// runSession drives one kiosk connection through greeting, handshake, ping,
+// and status reads, cleaning up the session on exit. The broker writes the
+// greeting first, then requires one valid status frame before publishing the
+// session: an uninitialized connection is invisible to the broker (no
+// listing, no Push), and a malformed, invalid, or unknown initial frame ends
+// the session instead. Every later client frame is a status update, applied
+// only when it reports on the current generation.
 func (h *Hub) runSession(ctx context.Context, k kiosks.Kiosk, c conn) {
 	defer func() {
 		// Close the socket before tearing the session down: teardown waits on
@@ -181,9 +239,6 @@ func (h *Hub) runSession(ctx context.Context, k kiosks.Kiosk, c conn) {
 		h.teardownSession(k.ID, c)
 		h.logger.Info("kiosk disconnected", "kiosk_id", k.ID, "name", k.Name)
 	}()
-
-	h.publishSession(k.ID, c)
-	h.logger.Info("kiosk connected", "kiosk_id", k.ID, "name", k.Name, "ip", k.IP)
 
 	data, err := marshal(newGreeting(k.Name))
 	if err != nil {
@@ -200,14 +255,36 @@ func (h *Hub) runSession(ctx context.Context, k kiosks.Kiosk, c conn) {
 
 	go h.pingLoop(ctx, cancel, c)
 
-	// Kiosks are receive-only: they never send application frames, so every
-	// inbound frame is intentionally discarded. Reads exist purely to observe
-	// connection errors and context cancellation.
+	// The handshake: the first client frame must be a valid status frame,
+	// and the session is published only once it arrives.
+	initial, err := h.readStatusFrame(ctx, c)
+	if err != nil {
+		h.logger.Warn("kiosk handshake failed", "error", err, "kiosk_id", k.ID, "name", k.Name)
+		return
+	}
+
+	h.publishSession(k.ID, c, initial)
+	h.logger.Info("kiosk connected", "kiosk_id", k.ID, "name", k.Name, "ip", k.IP, "status", initial)
+
+	// After the handshake, every client frame is a status update; reads also
+	// observe connection errors and context cancellation.
 	for {
-		if _, _, err := c.Read(ctx); err != nil {
+		st, err := h.readStatusFrame(ctx, c)
+		if err != nil {
 			return
 		}
+		h.updateStatus(k.ID, c, st)
 	}
+}
+
+// readStatusFrame reads one kiosk frame and decodes it as a status update.
+// Read errors (disconnect, ping-driven cancellation) propagate to the caller.
+func (h *Hub) readStatusFrame(ctx context.Context, c conn) (Status, error) {
+	_, data, err := c.Read(ctx)
+	if err != nil {
+		return "", err
+	}
+	return decodeStatusFrame(data)
 }
 
 // pingLoop keeps the connection alive with periodic pings. A failed ping
@@ -232,23 +309,27 @@ func (h *Hub) pingLoop(ctx context.Context, cancel context.CancelFunc, c conn) {
 	}
 }
 
-// publishSession registers c as the current session for id, replacing any
-// prior generation. Publication enters the identity's ordering boundary, so a
-// Push or a teardown of the previous generation cannot interleave with it. A
-// fresh identity publishes its conn atomically with the map insert, so
-// Connected and Push never observe an identity without a session. A
-// replacement re-checks membership after acquiring the boundary: if a
-// concurrent teardown removed that exact identity object while publication
-// waited, the object is detached and a fresh live identity is installed
-// instead, so the replacement is never orphaned outside h.identities. The
-// re-check holds the identity boundary across the map lock (identity-mu ->
-// hub-mu, the same nesting teardown uses); like two replacements racing on
-// the same identity, the last completed publication wins.
-func (h *Hub) publishSession(id uuid.UUID, c conn) {
+// publishSession registers c as the current session for id — replacing any
+// prior generation — together with the handshake status that gated it: a
+// session is published only after the greeting write and one valid initial
+// status frame, and that status is recorded atomically with the publication.
+// Publication enters the identity's ordering boundary, so a Push or a
+// teardown of the previous generation cannot interleave with it. A fresh
+// identity publishes its conn atomically with the map insert, so Statuses
+// and Push never observe an identity without a session. A replacement
+// re-checks membership after acquiring the boundary: if a concurrent
+// teardown removed that exact identity object while publication waited, the
+// object is detached and a fresh live identity is installed instead, so the
+// replacement is never orphaned outside h.identities. The re-check holds the
+// identity boundary across the map lock (identity-mu -> hub-mu, the same
+// nesting teardown uses); like two replacements racing on the same identity,
+// the last completed publication wins.
+func (h *Hub) publishSession(id uuid.UUID, c conn, st Status) {
 	h.mu.Lock()
 	idn, ok := h.identities[id]
 	if !ok {
 		h.identities[id] = &identity{conn: c}
+		h.statuses[id] = st
 		h.mu.Unlock()
 		return
 	}
@@ -264,6 +345,7 @@ func (h *Hub) publishSession(id uuid.UUID, c conn) {
 	} else {
 		h.identities[id] = &identity{conn: c}
 	}
+	h.statuses[id] = st
 	h.mu.Unlock()
 	idn.mu.Unlock()
 }
@@ -275,9 +357,10 @@ func (h *Hub) publishSession(id uuid.UUID, c conn) {
 // verifies under the map lock that this identity object is still the map's
 // entry before deleting: a replacement publication that installed a fresh
 // identity while teardown waited is never removed by the stale generation's
-// cleanup. Clearing the session and dropping the map entry happen under the
-// same critical section (identity-mu -> hub-mu, the same nesting
-// publication uses), so Connected and Push both observe an atomic removal.
+// cleanup. Clearing the session, dropping the map entry, and deleting its
+// reported status happen under the same critical section (identity-mu ->
+// hub-mu, the same nesting publication uses), so Statuses and Push both
+// observe an atomic removal.
 func (h *Hub) teardownSession(id uuid.UUID, c conn) {
 	h.mu.Lock()
 	idn, ok := h.identities[id]
@@ -294,9 +377,30 @@ func (h *Hub) teardownSession(id uuid.UUID, c conn) {
 	if h.identities[id] == idn && idn.conn == c {
 		idn.conn = nil
 		delete(h.identities, id)
+		delete(h.statuses, id)
 	}
 	h.mu.Unlock()
 	idn.mu.Unlock()
+}
+
+// updateStatus records a status report from the current session generation.
+// Reports from a replaced or disconnected generation are ignored: the
+// generation check runs under the map lock, where publication and teardown
+// make the current conn and its status visible atomically. A stale report is
+// logged so the broker's view of the kiosk state stays traceable.
+func (h *Hub) updateStatus(id uuid.UUID, c conn, st Status) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	idn, ok := h.identities[id]
+	if !ok {
+		h.logger.Info("kiosk status ignored: no live session", "kiosk_id", id)
+		return
+	}
+	if idn.conn != c {
+		h.logger.Info("kiosk status ignored: stale generation", "kiosk_id", id)
+		return
+	}
+	h.statuses[id] = st
 }
 
 // PushSign instructs a connected kiosk to open a signing session at url.
@@ -310,7 +414,7 @@ func (h *Hub) teardownSession(id uuid.UUID, c conn) {
 // ordered after removal gets ErrNotConnected. The map lock is dropped after
 // lookup and never reacquired under the boundary, so the only lock held
 // across the write is the identity's own: a stalled Write cannot block
-// Connected or a concurrent publication, and CloseNow from the session's
+// Statuses or a concurrent publication, and CloseNow from the session's
 // cleanup interrupts it so teardown is not left waiting on the boundary.
 // Logging of failures lives INSIDE PushSign.
 func (h *Hub) PushSign(ctx context.Context, id uuid.UUID, url string) error {
@@ -349,13 +453,18 @@ func (h *Hub) PushSign(ctx context.Context, id uuid.UUID, url string) error {
 	return nil
 }
 
-// Connected returns the UUIDs of all connected kiosks.
-func (h *Hub) Connected() []uuid.UUID {
+// Statuses returns a point-in-time snapshot of the status of every kiosk
+// whose live session has completed the status handshake: StatusReady or
+// StatusSigning for each listed identity. Sessions still awaiting their
+// initial status frame are absent — an uninitialized session is not Ready —
+// and so are Offline kiosks. The returned map is a copy; mutating it never
+// affects hub state.
+func (h *Hub) Statuses() map[uuid.UUID]Status {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	ids := make([]uuid.UUID, 0, len(h.identities))
-	for id := range h.identities {
-		ids = append(ids, id)
+	statuses := make(map[uuid.UUID]Status, len(h.statuses))
+	for id, st := range h.statuses {
+		statuses[id] = st
 	}
-	return ids
+	return statuses
 }

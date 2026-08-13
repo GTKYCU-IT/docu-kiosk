@@ -1,4 +1,4 @@
-import { parse, type Message } from "./protocol";
+import { encodeStatus, parse, type KioskStatus, type Message } from "./protocol";
 
 export type BrokerStatus =
   | "connecting" // socket opening/opened; greeting not yet received
@@ -18,6 +18,7 @@ export interface BrokerSocket {
   onmessage: ((ev: MessageEvent) => void) | null;
   onclose: (() => void) | null;
   onerror: (() => void) | null;
+  send(data: string): void;
   close(): void;
 }
 
@@ -39,6 +40,7 @@ const defaultCreateSocket = (url: string): BrokerSocket => {
     onmessage: null,
     onclose: null,
     onerror: null,
+    send: (data) => ws.send(data),
     close: () => ws.close(),
   };
   ws.onopen = () => socket.onopen?.();
@@ -138,24 +140,39 @@ export class BrokerConnection {
     }
   }
 
+  // Report the kiosk's current status to the broker. Status frames are only
+  // valid on the current generation after its greeting: nothing is sent
+  // before the greeting, from a replaced/disconnected socket, or after
+  // close(). All call sites run under the current-socket guard, so a stale
+  // generation can never emit a frame.
+  private sendStatus(status: KioskStatus): void {
+    if (this.closed || !this.authenticated || this.socket === null) return;
+    this.socket.send(encodeStatus(status));
+  }
+
   private handleConnected(name: string): void {
     this.authenticated = true;
     this.preGreetingRetries = 0;
     if (this.status === "signing") {
       // Reconnect during an active signing session: the iframe must stay
-      // mounted, so refresh only the stored name and keep "signing".
+      // mounted, so refresh only the stored name and keep "signing". The
+      // broker gates session publication on the initial status frame, so
+      // the replacement generation must first report that it is signing.
       this.kioskName = name;
+      this.sendStatus("signing");
       return;
     }
     this.status = "ready";
     this.kioskName = name;
     this.signingUrl = undefined;
+    this.sendStatus("ready");
     this.onChange({ status: "ready", kioskName: name });
   }
 
   private handleSign(url: string): void {
     this.status = "signing";
     this.signingUrl = url;
+    this.sendStatus("signing");
     this.onChange({ status: "signing", kioskName: this.kioskName, signingUrl: url });
   }
 
@@ -210,6 +227,7 @@ export class BrokerConnection {
     this.signingUrl = undefined;
     if (this.authenticated) {
       this.status = "ready";
+      this.sendStatus("ready");
       this.onChange({ status: "ready", kioskName: this.kioskName });
     } else {
       // The socket is down or the replacement has not been greeted yet; a

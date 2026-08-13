@@ -9,6 +9,22 @@ export type Message =
   | { type: "connected"; name: string }
   | { type: "sign"; url: string };
 
+// The kiosk's own wire status, reported to the broker. This is the only
+// client-origin frame type; the literals mirror the broker's status values
+// and are the typed home for them on the browser side.
+export type KioskStatus = "ready" | "signing";
+
+/**
+ * Encode a kiosk status report for the wire. The emitted bytes are exact:
+ * `{"type":"status","status":"ready"}` or the signing variant. The kiosk
+ * sends this as its first client frame after receiving the broker's
+ * greeting and again after every ready/signing transition, so the broker
+ * can gate session publication on a known status.
+ */
+export function encodeStatus(status: KioskStatus): string {
+  return JSON.stringify({ type: "status", status });
+}
+
 /**
  * Decode a raw WebSocket payload into a typed wire message.
  *
