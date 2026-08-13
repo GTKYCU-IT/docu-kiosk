@@ -7,8 +7,9 @@
   import { classifyRegistration } from "$lib/registration";
 
   let {
+    onRegistered,
     onAlreadyRegistered,
-  }: { onAlreadyRegistered?: () => void } = $props();
+  }: { onRegistered: () => void; onAlreadyRegistered: () => void } = $props();
 
   let name = $state("");
   let loading = $state(false);
@@ -31,12 +32,12 @@
       switch (outcome.kind) {
         case "registered":
           // New identity established: reload into the kiosk session.
-          location.reload();
+          onRegistered();
           return;
         case "already-registered":
           // The kiosk identity exists but the original 204 was lost. The App
           // reopens the broker session; the greeting supplies the name.
-          onAlreadyRegistered?.();
+          onAlreadyRegistered();
           return;
         case "name-conflict":
           // The name is held by another kiosk. Keep the submitted input on

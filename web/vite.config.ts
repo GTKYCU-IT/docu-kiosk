@@ -9,7 +9,10 @@ export default defineConfig({
     alias: {
       $lib: path.resolve('./src/lib'),
     },
+    conditions: ['browser'],
   },
+  // Component tests run in jsdom and need Svelte's client runtime. The
+  // browser condition is already the application's production condition.
   server: {
     proxy: {
       '/api': 'http://localhost:8080',

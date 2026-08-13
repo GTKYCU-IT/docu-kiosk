@@ -100,7 +100,10 @@
 {#if view === "install"}
   <AddToHomeScreen />
 {:else if view === "register"}
-  <Register onAlreadyRegistered={handleAlreadyRegistered} />
+  <Register
+    onRegistered={() => location.reload()}
+    onAlreadyRegistered={handleAlreadyRegistered}
+  />
 {:else if view === "reconnecting"}
   <div
     class="flex min-h-svh flex-col items-center justify-center gap-2 bg-muted"
