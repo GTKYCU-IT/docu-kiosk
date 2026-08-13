@@ -30,6 +30,28 @@ function makeClient(
   return { client, onChange }
 }
 
+// A listing fetch that never settles unless its AbortSignal is aborted, at
+// which point it rejects like a real fetch. Every signal it receives is
+// recorded so tests can observe the abort lifecycle. Push POSTs (/sessions)
+// resolve normally so push tests can drive the full flow.
+function hangingListingFetcher(): { fetcher: typeof fetch; signals: AbortSignal[] } {
+  const signals: AbortSignal[] = []
+  const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes('/sessions')) return Promise.resolve(okResponse(null))
+    const signal = init?.signal
+    // No abort seam: model the unbounded request — it never settles, exactly
+    // like the production hang the timeout contract fixes.
+    if (!signal) return new Promise<Response>(() => {})
+    signals.push(signal)
+    return new Promise<Response>((_resolve, reject) => {
+      signal.addEventListener('abort', () =>
+        reject(new DOMException('The operation was aborted.', 'AbortError'))
+      )
+    })
+  })
+  return { fetcher, signals }
+}
+
 describe('wire contract constants', () => {
   it('pins the intercept hash prefix', () => {
     expect(INTERCEPT_HASH_PREFIX).toBe('#url=')
@@ -63,7 +85,10 @@ describe('BrokerClient', () => {
 
     client.listKiosks()
     // The immediate request fires without waiting for the poll interval.
-    expect(fetcher).toHaveBeenCalledWith('https://broker.local/api/kiosks')
+    expect(fetcher).toHaveBeenCalledWith(
+      'https://broker.local/api/kiosks',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
     await vi.advanceTimersByTimeAsync(0)
     expect(onChange).toHaveBeenLastCalledWith({
       status: 'ready',
@@ -79,7 +104,10 @@ describe('BrokerClient', () => {
     const onChange = vi.fn()
     const client = new BrokerClient({ url: 'https://broker.local///', onChange, fetcher })
     client.listKiosks()
-    expect(fetcher).toHaveBeenCalledWith('https://broker.local/api/kiosks')
+    expect(fetcher).toHaveBeenCalledWith(
+      'https://broker.local/api/kiosks',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
     await vi.advanceTimersByTimeAsync(0)
     expect(onChange).toHaveBeenLastCalledWith({ status: 'ready', kiosks: [] })
   })
@@ -186,6 +214,53 @@ describe('BrokerClient', () => {
     }
   })
 
+  it('aborts a listing hung past the poll deadline, reports unreachable, and starts a later poll', async () => {
+    const { fetcher, signals } = hangingListingFetcher()
+    const onChange = vi.fn()
+    const { client } = makeClient(fetcher, onChange)
+    client.listKiosks()
+
+    // The listing request carries an AbortSignal, still live while pending.
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(signals[0]).toBeInstanceOf(AbortSignal)
+    expect(signals[0].aborted).toBe(false)
+    expect(onChange).toHaveBeenCalledTimes(1) // loading only — a hang is not yet a failure
+
+    // A request hung past the per-listing deadline is aborted at
+    // pollIntervalMs, not before.
+    await vi.advanceTimersByTimeAsync(2999)
+    expect(signals[0].aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(signals[0].aborted).toBe(true)
+    // The timeout is a failure: unreachable is published, and no immediate
+    // retry replaces the normal poll schedule.
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenLastCalledWith({ status: 'unreachable', kiosks: [] })
+
+    // After the normal poll delay a fresh listing request starts.
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(signals[1]).toBeInstanceOf(AbortSignal)
+    expect(signals[1].aborted).toBe(false)
+    client.close()
+  })
+
+  it('uses pollIntervalMs as the per-listing deadline', async () => {
+    const { fetcher, signals } = hangingListingFetcher()
+    const onChange = vi.fn()
+    const { client } = makeClient(fetcher, onChange, { pollIntervalMs: 100 })
+    client.listKiosks()
+    await vi.advanceTimersByTimeAsync(99)
+    expect(signals[0].aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(signals[0].aborted).toBe(true)
+    expect(onChange).toHaveBeenLastCalledWith({ status: 'unreachable', kiosks: [] })
+    // The recovery poll follows one interval later.
+    await vi.advanceTimersByTimeAsync(100)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    client.close()
+  })
+
   it('POSTs {url} to the /sessions wire endpoint on push', async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       if (String(input).includes('/sessions')) return okResponse(null)
@@ -228,6 +303,28 @@ describe('BrokerClient', () => {
     // Success leaves polling paused — the page closes.
     await vi.advanceTimersByTimeAsync(9000)
     expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
+  it('aborts the active listing when a push starts without publishing unreachable', async () => {
+    const { fetcher, signals } = hangingListingFetcher()
+    const onChange = vi.fn()
+    const { client } = makeClient(fetcher, onChange)
+    client.listKiosks()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledTimes(1) // loading only
+
+    await client.push('k1', 'https://sign.example/abc')
+    // The push supersedes the in-flight listing: it is aborted, and the
+    // abort is not a timeout, so no unreachable state is published.
+    expect(signals[0].aborted).toBe(true)
+    expect(onChange).toHaveBeenCalledTimes(1)
+
+    // Polling stays paused after the successful push — no resumed polls and
+    // no stale deadline can fire afterwards.
+    await vi.advanceTimersByTimeAsync(9000)
+    expect(fetcher).toHaveBeenCalledTimes(2) // listing + push POST
+    expect(onChange).toHaveBeenCalledTimes(1)
   })
 
   it('resumes polling after a failed push and throws a push-named error', async () => {
@@ -277,6 +374,25 @@ describe('BrokerClient', () => {
     expect(onChange).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(9000)
     expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it('aborts the active listing on close without publishing unreachable', async () => {
+    const { fetcher, signals } = hangingListingFetcher()
+    const onChange = vi.fn()
+    const { client } = makeClient(fetcher, onChange)
+    client.listKiosks()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onChange).toHaveBeenCalledTimes(1) // loading only
+
+    client.close()
+    expect(signals[0].aborted).toBe(true)
+    // The abort is not a timeout: no unreachable state is published and no
+    // further poll fires.
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onChange).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(9000)
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledTimes(1)
   })
 
   it('does not resume polling when a push fails after close', async () => {
