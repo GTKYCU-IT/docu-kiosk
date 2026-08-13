@@ -91,7 +91,7 @@ describe("BrokerConnection", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { sockets, states } = makeHarness();
     sockets[0].message(JSON.stringify({ type: "ping" }));
-    expect(warn).toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith("broker: dropping malformed message", '{"type":"ping"}');
     expect(states).toEqual([]);
   });
 
@@ -99,10 +99,10 @@ describe("BrokerConnection", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { sockets, states } = makeHarness();
     sockets[0].message(JSON.stringify({ type: "connected", name: 5 }));
-    expect(warn).toHaveBeenCalledWith("broker: dropping malformed connected message", {
-      type: "connected",
-      name: 5,
-    });
+    expect(warn).toHaveBeenCalledWith(
+      "broker: dropping malformed message",
+      '{"type":"connected","name":5}',
+    );
     expect(states).toEqual([]);
   });
 
@@ -110,9 +110,7 @@ describe("BrokerConnection", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { sockets, states } = makeHarness();
     sockets[0].message(JSON.stringify({ type: "sign" }));
-    expect(warn).toHaveBeenCalledWith("broker: dropping malformed sign message", {
-      type: "sign",
-    });
+    expect(warn).toHaveBeenCalledWith("broker: dropping malformed message", '{"type":"sign"}');
     expect(states).toEqual([]);
   });
 
