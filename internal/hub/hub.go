@@ -136,12 +136,6 @@ type Hub struct {
 	originPolicy OriginPolicy
 	mu           sync.Mutex
 	identities   map[uuid.UUID]*identity
-	// statuses holds the reported status of every identity whose live
-	// session completed the status handshake, guarded by the same mutex as
-	// identities so publication, teardown, and the Statuses snapshot observe
-	// the session set and its statuses atomically. An identity absent from
-	// this map is Offline or uninitialized.
-	statuses     map[uuid.UUID]Status
 	pingInterval time.Duration
 	pingTimeout  time.Duration
 }
@@ -159,6 +153,12 @@ type Hub struct {
 type identity struct {
 	mu   sync.Mutex
 	conn conn // current session; nil only inside teardown, atomically removed
+	// status is the reported status of the current session, guarded by
+	// Hub.mu like conn: publication, teardown, status updates, and the
+	// Statuses snapshot observe the session and its status atomically. It is
+	// meaningful only while the identity is the map's entry for its id — a
+	// detached identity is never read by Statuses or Push.
+	status Status
 }
 
 // New returns a Hub that authenticates kiosks against store and logs through
@@ -170,7 +170,6 @@ func New(store KioskStore, logger *slog.Logger, opts ...Option) *Hub {
 		store:        store,
 		logger:       logger,
 		identities:   make(map[uuid.UUID]*identity),
-		statuses:     make(map[uuid.UUID]Status),
 		pingInterval: 30 * time.Second,
 		pingTimeout:  5 * time.Second,
 	}
@@ -312,24 +311,24 @@ func (h *Hub) pingLoop(ctx context.Context, cancel context.CancelFunc, c conn) {
 // publishSession registers c as the current session for id — replacing any
 // prior generation — together with the handshake status that gated it: a
 // session is published only after the greeting write and one valid initial
-// status frame, and that status is recorded atomically with the publication.
-// Publication enters the identity's ordering boundary, so a Push or a
-// teardown of the previous generation cannot interleave with it. A fresh
-// identity publishes its conn atomically with the map insert, so Statuses
-// and Push never observe an identity without a session. A replacement
-// re-checks membership after acquiring the boundary: if a concurrent
-// teardown removed that exact identity object while publication waited, the
-// object is detached and a fresh live identity is installed instead, so the
-// replacement is never orphaned outside h.identities. The re-check holds the
-// identity boundary across the map lock (identity-mu -> hub-mu, the same
-// nesting teardown uses); like two replacements racing on the same identity,
-// the last completed publication wins.
+// status frame, and that status is recorded on the identity atomically with
+// the publication. Publication enters the identity's ordering boundary, so a
+// Push or a teardown of the previous generation cannot interleave with it. A
+// fresh identity publishes its conn and status atomically with the map
+// insert, so Statuses and Push never observe an identity without a session
+// or a reported status. A replacement re-checks membership after acquiring
+// the boundary: if a concurrent teardown removed that exact identity object
+// while publication waited, the object is detached and a fresh live identity
+// is installed instead, so the replacement is never orphaned outside
+// h.identities. The re-check holds the identity boundary across the map lock
+// (identity-mu -> hub-mu, the same nesting teardown uses); like two
+// replacements racing on the same identity, the last completed publication
+// wins.
 func (h *Hub) publishSession(id uuid.UUID, c conn, st Status) {
 	h.mu.Lock()
 	idn, ok := h.identities[id]
 	if !ok {
-		h.identities[id] = &identity{conn: c}
-		h.statuses[id] = st
+		h.identities[id] = &identity{conn: c, status: st}
 		h.mu.Unlock()
 		return
 	}
@@ -342,10 +341,10 @@ func (h *Hub) publishSession(id uuid.UUID, c conn, st Status) {
 	h.mu.Lock()
 	if h.identities[id] == idn {
 		idn.conn = c
+		idn.status = st
 	} else {
-		h.identities[id] = &identity{conn: c}
+		h.identities[id] = &identity{conn: c, status: st}
 	}
-	h.statuses[id] = st
 	h.mu.Unlock()
 	idn.mu.Unlock()
 }
@@ -357,10 +356,10 @@ func (h *Hub) publishSession(id uuid.UUID, c conn, st Status) {
 // verifies under the map lock that this identity object is still the map's
 // entry before deleting: a replacement publication that installed a fresh
 // identity while teardown waited is never removed by the stale generation's
-// cleanup. Clearing the session, dropping the map entry, and deleting its
-// reported status happen under the same critical section (identity-mu ->
-// hub-mu, the same nesting publication uses), so Statuses and Push both
-// observe an atomic removal.
+// cleanup. Clearing the session and dropping the map entry — which carries
+// the reported status off the snapshot with it — happen under the same
+// critical section (identity-mu -> hub-mu, the same nesting publication
+// uses), so Statuses and Push both observe an atomic removal.
 func (h *Hub) teardownSession(id uuid.UUID, c conn) {
 	h.mu.Lock()
 	idn, ok := h.identities[id]
@@ -377,7 +376,6 @@ func (h *Hub) teardownSession(id uuid.UUID, c conn) {
 	if h.identities[id] == idn && idn.conn == c {
 		idn.conn = nil
 		delete(h.identities, id)
-		delete(h.statuses, id)
 	}
 	h.mu.Unlock()
 	idn.mu.Unlock()
@@ -400,7 +398,7 @@ func (h *Hub) updateStatus(id uuid.UUID, c conn, st Status) {
 		h.logger.Info("kiosk status ignored: stale generation", "kiosk_id", id)
 		return
 	}
-	h.statuses[id] = st
+	idn.status = st
 }
 
 // PushSign instructs a connected kiosk to open a signing session at url.
@@ -462,9 +460,9 @@ func (h *Hub) PushSign(ctx context.Context, id uuid.UUID, url string) error {
 func (h *Hub) Statuses() map[uuid.UUID]Status {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	statuses := make(map[uuid.UUID]Status, len(h.statuses))
-	for id, st := range h.statuses {
-		statuses[id] = st
+	statuses := make(map[uuid.UUID]Status, len(h.identities))
+	for id, idn := range h.identities {
+		statuses[id] = idn.status
 	}
 	return statuses
 }

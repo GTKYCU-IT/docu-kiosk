@@ -35,9 +35,13 @@ func textFrame(s string) frame {
 // otherwise blocks on readCh, returning an error once it is closed, but also
 // returns ctx.Err() when ctx is done — mirroring real conn semantics.
 type fakeConn struct {
-	mu             sync.Mutex
-	writes         [][]byte
-	readFrames     []frame
+	mu         sync.Mutex
+	writes     [][]byte
+	readFrames []frame
+	// readCount counts the frames Read has consumed: a session that consumed
+	// its initial status frame has completed the handshake read and entered
+	// the publication path.
+	readCount      int
 	readSignal     chan struct{} // closed (and replaced) when a frame is queued
 	writeErr       error
 	pingErr        error
@@ -163,6 +167,7 @@ func (f *fakeConn) Read(ctx context.Context) (websocket.MessageType, []byte, err
 		if len(f.readFrames) > 0 {
 			fr := f.readFrames[0]
 			f.readFrames = f.readFrames[1:]
+			f.readCount++
 			f.mu.Unlock()
 			return fr.typ, fr.data, nil
 		}
@@ -218,6 +223,16 @@ func (f *fakeConn) lastWrite() []byte {
 		return nil
 	}
 	return f.writes[len(f.writes)-1]
+}
+
+// framesConsumed reports how many frames Read has consumed. A session that
+// consumed its initial status frame is past the handshake read and inside
+// the publication path, so a concurrent operation holding the identity
+// boundary has a queued — not merely scheduled — publication behind it.
+func (f *fakeConn) framesConsumed() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.readCount
 }
 
 // fakeStore is a map-backed KioskStore: unknown IPs yield kiosks.ErrNotFound,
@@ -907,11 +922,12 @@ func TestPushSignBlockedPushCompletesBeforeReplacement(t *testing.T) {
 	startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
 		textFrame(`{"type":"status","status":"signing"}`))
 	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
-	select {
-	case <-time.After(300 * time.Millisecond):
-		if got := h.Statuses()[id]; got != StatusReady {
-			t.Fatalf("replacement published while a push held the identity boundary: status = %s", got)
-		}
+	// The handshake frame has been consumed: the replacement is inside the
+	// publication path, queued on the identity boundary the push holds, so
+	// the snapshot must still show the prior generation.
+	waitFor(t, func() bool { return connB.framesConsumed() >= 1 })
+	if got := h.Statuses()[id]; got != StatusReady {
+		t.Fatalf("replacement published while a push held the identity boundary: status = %s", got)
 	}
 
 	// Release the write: the push, ordered before the replacement, succeeds
@@ -1009,11 +1025,12 @@ func TestPushSignBlockedPushWriteErrorWithPendingReplacement(t *testing.T) {
 	startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
 		textFrame(`{"type":"status","status":"signing"}`))
 	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
-	select {
-	case <-time.After(300 * time.Millisecond):
-		if got := h.Statuses()[id]; got != StatusReady {
-			t.Fatalf("replacement published while a push held the identity boundary: status = %s", got)
-		}
+	// The handshake frame has been consumed: the replacement is inside the
+	// publication path, queued on the identity boundary the push holds, so
+	// the snapshot must still show the prior generation.
+	waitFor(t, func() bool { return connB.framesConsumed() >= 1 })
+	if got := h.Statuses()[id]; got != StatusReady {
+		t.Fatalf("replacement published while a push held the identity boundary: status = %s", got)
 	}
 
 	// Release the write: the push fails with the write error, wrapping both
@@ -1323,11 +1340,12 @@ func TestTeardownRacingReplacementLeavesReplacementLive(t *testing.T) {
 		startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
 			textFrame(`{"type":"status","status":"signing"}`))
 		waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
-		select {
-		case <-time.After(300 * time.Millisecond):
-			if got := h.Statuses()[id]; got != StatusReady {
-				t.Fatalf("replacement published while the identity boundary was held: status = %s", got)
-			}
+		// The handshake frame has been consumed: the replacement is inside
+		// the publication path, queued on the identity boundary, so the
+		// snapshot must still show the prior generation.
+		waitFor(t, func() bool { return connB.framesConsumed() >= 1 })
+		if got := h.Statuses()[id]; got != StatusReady {
+			t.Fatalf("replacement published while the identity boundary was held: status = %s", got)
 		}
 
 		// Release the push: the old teardown, queued first, wins the boundary
@@ -1400,11 +1418,12 @@ func TestTeardownRacingReplacementLeavesReplacementLive(t *testing.T) {
 		startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
 			textFrame(`{"type":"status","status":"signing"}`))
 		waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
-		select {
-		case <-time.After(300 * time.Millisecond):
-			if got := h.Statuses()[id]; got != StatusReady {
-				t.Fatalf("replacement published while the identity boundary was held: status = %s", got)
-			}
+		// The handshake frame has been consumed: the replacement is inside
+		// the publication path, queued on the identity boundary, so the
+		// snapshot must still show the prior generation.
+		waitFor(t, func() bool { return connB.framesConsumed() >= 1 })
+		if got := h.Statuses()[id]; got != StatusReady {
+			t.Fatalf("replacement published while the identity boundary was held: status = %s", got)
 		}
 
 		// The old session disconnects after the replacement queued: its

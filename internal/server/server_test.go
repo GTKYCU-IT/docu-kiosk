@@ -174,9 +174,7 @@ func writeStatus(t *testing.T, conn *websocket.Conn, status string) {
 // connecting IP must already be registered via registerKiosk.
 func connectWS(t *testing.T, ts *httptest.Server) (*websocket.Conn, string) {
 	t.Helper()
-	conn, name := dialWS(t, ts, nil)
-	writeStatus(t, conn, "ready")
-	return conn, name
+	return connectWSStatus(t, ts, "ready")
 }
 
 // connectWSStatus is connectWS with a caller-chosen handshake status.
@@ -418,13 +416,16 @@ func TestRegisterAlreadyRegisteredSameName(t *testing.T) {
 // kiosk-already-registered and the stored identity — id, display name, and
 // greeting — is untouched.
 func TestRegisterSameIPCannotRename(t *testing.T) {
-	_, ts := setupTestServer(t)
+	s, ts := setupTestServer(t)
 	registerKiosk(t, ts, "A")
 
 	_, name := connectWS(t, ts)
 	if name != "A" {
 		t.Errorf("expected greeting name A, got %s", name)
 	}
+	// The session is published only after the broker consumes the status
+	// frame completing the handshake.
+	waitFor(t, func() bool { return len(s.hub.Statuses()) == 1 })
 	before := listKiosks(t, ts)
 	if len(before) != 1 || before[0].Name != "A" {
 		t.Fatalf("expected one kiosk named A, got %+v", before)
@@ -643,9 +644,13 @@ func TestListKiosksEmpty(t *testing.T) {
 }
 
 func TestListKiosksShowsConnected(t *testing.T) {
-	_, ts := setupTestServer(t)
+	s, ts := setupTestServer(t)
 	registerKiosk(t, ts, "lobby")
 	connectWS(t, ts)
+
+	// The session is published only after the broker consumes the status
+	// frame completing the handshake.
+	waitFor(t, func() bool { return len(s.hub.Statuses()) == 1 })
 
 	res, err := http.Get(ts.URL + "/api/kiosks")
 	if err != nil {
