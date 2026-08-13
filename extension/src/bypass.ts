@@ -1,4 +1,4 @@
-import { INTERCEPT_HASH_PREFIX } from './lib/broker-client'
+import { INTERCEPT_HASH_PREFIX } from './lib/broker'
 
 /** Rule IDs 1–4 are the intercept patterns. IDs 5–99 are reserved. IDs 100+ are per-tab bypass allow rules. */
 export const BYPASS_RULE_START_ID = 100
