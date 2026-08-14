@@ -197,12 +197,9 @@ export class AdminSessionController {
 
     const peerJwt = await this.requestPeerToken(null);
     if (!this.isCurrent(operation)) return;
-    if (peerJwt !== null) {
-      this.acceptToken(peerJwt, false, this.epoch);
-      return;
+    if (peerJwt === null) {
+      await this.refreshWithCoordination(operation, null);
     }
-
-    await this.refreshWithCoordination(operation, null);
   }
 
   retry(): Promise<void> {
@@ -378,12 +375,9 @@ export class AdminSessionController {
 
       const peerJwt = await this.requestPeerToken(rejectedJwt);
       if (!this.isCurrent(operation)) return;
-      if (peerJwt !== null) {
-        this.acceptToken(peerJwt, false, this.epoch);
-        return;
+      if (peerJwt === null) {
+        await this.refreshFromServer(operation);
       }
-
-      await this.refreshFromServer(operation);
     };
 
     if (this.locks === null) {

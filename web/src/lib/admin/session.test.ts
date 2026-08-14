@@ -135,13 +135,27 @@ describe("AdminSessionController refresh coordination", () => {
       channel: bus.open(),
       tabId: "owner",
     }).session;
-    const peer = createSession(peerFetch, {
+    const { session: peer, states: peerStates } = createSession(peerFetch, {
       channel: bus.open(),
       tabId: "peer",
-    }).session;
+    });
 
     await owner.restore();
+    const authenticatedBeforeHandoff = peerStates.filter(
+      (state) => state.status === "authenticated",
+    ).length;
+
     await peer.restore();
+
+    // The targeted token handoff is the single acceptance point:
+    // receiveMessage installs the JWT/epoch and emits authenticated before
+    // resolving the waiter, so restore() only observes the non-null result.
+    // A caller-side re-accept would emit a duplicate authenticated
+    // transition.
+    const authenticatedAfterHandoff = peerStates.filter(
+      (state) => state.status === "authenticated",
+    ).length;
+    expect(authenticatedAfterHandoff).toBe(authenticatedBeforeHandoff + 1);
 
     expect(peer.getAccessToken()).toBe(owner.getAccessToken());
     expect(peer.getState()).toEqual({ status: "authenticated" });
@@ -171,18 +185,24 @@ describe("AdminSessionController refresh coordination", () => {
       peerWaitMs: 0,
       tabId: "first",
     }).session;
-    const second = createSession(secondFetch, {
+    const { session: second, states: secondStates } = createSession(secondFetch, {
       channel: bus.open(),
       locks,
       peerWaitMs: 0,
       tabId: "second",
-    }).session;
+    });
 
     await Promise.all([first.restore(), second.restore()]);
 
     expect(firstFetch.mock.calls.length + secondFetch.mock.calls.length).toBe(1);
     expect(first.getAccessToken()).toBe(token);
     expect(second.getAccessToken()).toBe(token);
+    // The in-lock successor is handed the shared token exactly once: the
+    // accepting controller emits a single authenticated transition, and
+    // restore() does not re-accept the observed successor.
+    expect(
+      secondStates.filter((state) => state.status === "authenticated"),
+    ).toHaveLength(1);
     expect(new Set(locks.requestedNames)).toEqual(
       new Set(["docu-kiosk-admin-session-refresh"]),
     );
