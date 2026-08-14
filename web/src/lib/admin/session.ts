@@ -324,16 +324,21 @@ export class AdminSessionController {
   terminalAuthenticationLoss(): void {
     if (this.closed) return;
 
-    // Local-origin loss: this tab's own fetch failed, so peers must hear about it.
-    // Capture and end the epoch first: localTerminalTransition clears it.
+    // Local-origin loss: this tab's own fetch failed, so peers in the same
+    // browser-session epoch must hear about it. Capture and end the epoch
+    // first: localTerminalTransition clears it. A null-epoch loss is local
+    // only: no epoch is held, and a null-epoch terminal message would cancel
+    // unrelated sibling login/restore operations that also have no epoch.
     const epoch = this.epoch;
     if (epoch !== null) this.endedEpochs.add(epoch);
     this.localTerminalTransition();
-    this.postMessage({
-      type: "terminal",
-      tabId: this.tabId,
-      epoch,
-    });
+    if (epoch !== null) {
+      this.postMessage({
+        type: "terminal",
+        tabId: this.tabId,
+        epoch,
+      });
+    }
   }
 
   close(): void {

@@ -294,8 +294,9 @@ describe("AdminSessionController protected requests", () => {
       .mockResolvedValueOnce(response(200, { jwt: token }))
       .mockResolvedValueOnce(response(401))
       .mockResolvedValueOnce(response(401));
+    const { channel, posted } = recordingChannel(bus);
     const owner = createSession(fetchMock, {
-      channel: bus.open(),
+      channel,
       tabId: "owner",
     }).session;
     const peer = createSession(vi.fn(), {
@@ -304,11 +305,18 @@ describe("AdminSessionController protected requests", () => {
     }).session;
     await owner.restore();
 
+    const sessionEpoch = posted.find(messageOfType("token"))?.epoch ?? null;
+    expect(sessionEpoch).not.toBeNull();
+
     const result = await owner.protectedFetch("/admin/documents");
 
     expect(result.status).toBe(401);
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(owner.getState()).toEqual({ status: "login", submitting: false });
+    // The loss in a held epoch still propagates: the terminal broadcast
+    // names that epoch, so the same-epoch peer terminates.
+    const terminalBroadcast = posted.find(messageOfType("terminal"));
+    expect(terminalBroadcast?.epoch).toBe(sessionEpoch);
     expect(peer.getState()).toEqual({ status: "login", submitting: false });
   });
 
@@ -731,6 +739,62 @@ describe("AdminSessionController browser-session epoch", () => {
     expect(peer.getState()).toEqual({ status: "login", submitting: false });
     expect(peer.getAccessToken()).toBeNull();
     expect(peerFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("a null-epoch refresh 401 ends the restoring tab locally without cancelling a sibling's deferred login", async () => {
+    const bus = new TestChannelBus();
+
+    // The login tab first fails restore so it reaches the login screen, then
+    // its login POST stays in flight while the sibling restores.
+    let resolveLogin!: (value: Response | PromiseLike<Response>) => void;
+    const loginDeferred = new Promise<Response>((res) => {
+      resolveLogin = res;
+    });
+    const loginFetch = vi
+      .fn()
+      .mockResolvedValueOnce(response(401))
+      .mockReturnValueOnce(loginDeferred);
+    const loginTab = createSession(loginFetch, {
+      channel: bus.open(),
+      tabId: "login-tab",
+    }).session;
+    await loginTab.restore();
+    expect(loginTab.getState()).toEqual({ status: "login", submitting: false });
+
+    const login = loginTab.login("administrator", "secret phrase");
+    expect(loginTab.getState()).toEqual({ status: "login", submitting: true });
+
+    // The sibling restores holding no browser-session epoch; its refresh 401
+    // must end only this tab. A null-epoch terminal broadcast would cancel
+    // the unrelated login POST, which also holds no epoch.
+    const { channel: restoringChannel, posted } = recordingChannel(bus);
+    const restoring = createSession(
+      vi.fn().mockResolvedValue(response(401)),
+      {
+        channel: restoringChannel,
+        tabId: "restoring-tab",
+      },
+    ).session;
+    await restoring.restore();
+
+    expect(restoring.getState()).toEqual({ status: "login", submitting: false });
+    expect(restoring.getAccessToken()).toBeNull();
+    expect(posted.filter(messageOfType("terminal"))).toHaveLength(0);
+    expect(posted.filter(messageOfType("logout"))).toHaveLength(0);
+
+    // The sibling's local loss left the deferred login untouched.
+    expect(loginTab.getState()).toEqual({ status: "login", submitting: true });
+
+    // The deferred login completes normally: the login tab authenticates and
+    // its token broadcast restores the sibling too.
+    const token = testJwt(NOW + 60_000);
+    resolveLogin(response(200, { jwt: token }));
+    await login;
+
+    expect(loginTab.getState()).toEqual({ status: "authenticated" });
+    expect(loginTab.getAccessToken()).toBe(token);
+    expect(restoring.getState()).toEqual({ status: "authenticated" });
+    expect(restoring.getAccessToken()).toBe(token);
   });
 
   it.each(["terminal", "logout"])(
