@@ -74,15 +74,59 @@ func (q *Queries) MakeRefreshToken(ctx context.Context, arg MakeRefreshTokenPara
 	return i, err
 }
 
-const revokeRefreshToken = `-- name: RevokeRefreshToken :exec
+const revokeCurrentRefreshToken = `-- name: RevokeCurrentRefreshToken :one
 UPDATE refresh_tokens
 SET
     revoked_at = datetime('now'),
     updated_at = datetime('now')
 WHERE token = ?
+  AND revoked_at IS NULL
+  AND expires_at > datetime('now')
+RETURNING token, created_at, updated_at, user_id, expires_at, revoked_at
 `
 
-func (q *Queries) RevokeRefreshToken(ctx context.Context, token string) error {
-	_, err := q.db.ExecContext(ctx, revokeRefreshToken, token)
-	return err
+func (q *Queries) RevokeCurrentRefreshToken(ctx context.Context, token string) (RefreshToken, error) {
+	row := q.db.QueryRowContext(ctx, revokeCurrentRefreshToken, token)
+	var i RefreshToken
+	err := row.Scan(
+		&i.Token,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.UserID,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const rotateRefreshToken = `-- name: RotateRefreshToken :one
+UPDATE refresh_tokens
+SET
+    token = hex(randomblob(32)),
+    created_at = datetime('now'),
+    updated_at = datetime('now'),
+    expires_at = ?
+WHERE token = ?
+  AND revoked_at IS NULL
+  AND expires_at > datetime('now')
+RETURNING token, created_at, updated_at, user_id, expires_at, revoked_at
+`
+
+type RotateRefreshTokenParams struct {
+	ExpiresAt time.Time
+	Token     string
+}
+
+func (q *Queries) RotateRefreshToken(ctx context.Context, arg RotateRefreshTokenParams) (RefreshToken, error) {
+	row := q.db.QueryRowContext(ctx, rotateRefreshToken, arg.ExpiresAt, arg.Token)
+	var i RefreshToken
+	err := row.Scan(
+		&i.Token,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.UserID,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+	)
+	return i, err
 }

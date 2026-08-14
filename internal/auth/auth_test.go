@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -132,10 +133,21 @@ func TestRotateRefresh(t *testing.T) {
 	if newRefresh == oldRefresh {
 		t.Error("rotated refresh token should differ from the old one")
 	}
+
+	// The rotation replaced the old value in place: the old token no longer
+	// resolves, and the successor is the one live token that rotates again.
+	if _, err := queries.GetRefreshToken(context.Background(), oldRefresh); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("expected the old token to be gone after rotation, got %v", err)
+	}
+	if _, successor2, err := module.RotateRefresh(context.Background(), newRefresh); err != nil {
+		t.Fatalf("successor must rotate again: %v", err)
+	} else if successor2 == newRefresh {
+		t.Error("second rotation must issue yet another token")
+	}
 }
 
 func TestRotateRefreshRejectsRevoked(t *testing.T) {
-	module, queries, _ := newTestModule(t)
+	module, queries, db := newTestModule(t)
 	createTestUser(t, queries, "admin", "correct horse")
 
 	_, oldRefresh, err := module.Login(context.Background(), "admin", "correct horse")
@@ -146,9 +158,18 @@ func TestRotateRefreshRejectsRevoked(t *testing.T) {
 	if _, _, err := module.RotateRefresh(context.Background(), oldRefresh); err != nil {
 		t.Fatal(err)
 	}
-	// The old token was revoked by the first rotation; replaying it must fail.
+	// The old token was replaced by the first rotation; replaying it must fail.
 	if _, _, err := module.RotateRefresh(context.Background(), oldRefresh); !errors.Is(err, ErrInvalidRefreshToken) {
 		t.Errorf("expected ErrInvalidRefreshToken for replayed token, got %v", err)
+	}
+	// The lost replay must not create a successor: exactly the one rotated
+	// row remains, still carrying the first successor.
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM refresh_tokens").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("expected exactly one token row after a lost replay, got %d", count)
 	}
 }
 
@@ -215,25 +236,28 @@ func TestValidateRejectsForgedToken(t *testing.T) {
 // fakeStore is a scriptable store for AuthModule tests. Every store method is
 // implemented explicitly — no nil interface promotion — so a test reaches a
 // method only by stubbing it. The seam methods (CountUsers, CreateUser,
-// GetUserByUsername, GetRefreshToken, MakeRefreshToken, RevokeRefreshToken)
-// carry scripted results per scenario; GetUser fails loudly and intentionally,
-// so any test that drives it must replace the stub. CreateUser records its
-// calls so tests can prove no downstream creation happens on skipped, invalid,
-// or error paths.
+// GetUserByUsername, GetRefreshToken, MakeRefreshToken, RotateRefreshToken,
+// RevokeCurrentRefreshToken) carry scripted results per scenario; GetUser
+// fails loudly and intentionally, so any test that drives it must replace the
+// stub. CreateUser records its calls so tests can prove no downstream creation
+// happens on skipped, invalid, or error paths.
 type fakeStore struct {
-	countUsers          int64
-	countUsersErr       error
-	createdUser         database.User
-	createUserErr       error
-	createCalls         int
-	createdParams       database.CreateUserParams
-	userByUsername      database.User
-	userByUsernameErr   error
-	refreshToken        database.RefreshToken
-	refreshTokenErr     error
-	makeRefreshToken    database.RefreshToken
-	makeRefreshTokenErr error
-	revokeErr           error
+	countUsers                   int64
+	countUsersErr                error
+	createdUser                  database.User
+	createUserErr                error
+	createCalls                  int
+	createdParams                database.CreateUserParams
+	userByUsername               database.User
+	userByUsernameErr            error
+	refreshToken                 database.RefreshToken
+	refreshTokenErr              error
+	makeRefreshToken             database.RefreshToken
+	makeRefreshTokenErr          error
+	rotateRefreshToken           database.RefreshToken
+	rotateRefreshTokenErr        error
+	revokeCurrentRefreshToken    database.RefreshToken
+	revokeCurrentRefreshTokenErr error
 }
 
 func (f *fakeStore) CountUsers(_ context.Context) (int64, error) {
@@ -262,8 +286,12 @@ func (f *fakeStore) MakeRefreshToken(_ context.Context, _ database.MakeRefreshTo
 	return f.makeRefreshToken, f.makeRefreshTokenErr
 }
 
-func (f *fakeStore) RevokeRefreshToken(_ context.Context, _ string) error {
-	return f.revokeErr
+func (f *fakeStore) RotateRefreshToken(_ context.Context, _ database.RotateRefreshTokenParams) (database.RefreshToken, error) {
+	return f.rotateRefreshToken, f.rotateRefreshTokenErr
+}
+
+func (f *fakeStore) RevokeCurrentRefreshToken(_ context.Context, _ string) (database.RefreshToken, error) {
+	return f.revokeCurrentRefreshToken, f.revokeCurrentRefreshTokenErr
 }
 
 // newFakeModule builds an AuthModule around a fake store, proving the seam
@@ -310,6 +338,179 @@ func TestRotateRefreshStoreLookupFailureMapsToInvalidToken(t *testing.T) {
 
 	if _, _, err := module.RotateRefresh(context.Background(), "some-token"); !errors.Is(err, ErrInvalidRefreshToken) {
 		t.Errorf("expected ErrInvalidRefreshToken, got %v", err)
+	}
+}
+
+// Concurrent rotations of the same token must produce at most one successor:
+// exactly one racer wins the atomic exchange, every loser gets
+// ErrInvalidRefreshToken, and a single live token row remains. The pool is
+// pinned to one connection so the in-memory database is shared; the rotation
+// property itself is enforced by the conditional UPDATE.
+func TestRotateRefreshConcurrentReplayProducesSingleSuccessor(t *testing.T) {
+	module, queries, db := newTestModule(t)
+	db.SetMaxOpenConns(1)
+	createTestUser(t, queries, "admin", "correct horse")
+
+	_, refresh, err := module.Login(context.Background(), "admin", "correct horse")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const racers = 8
+	var wg sync.WaitGroup
+	results := make(chan error, racers)
+	for range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := module.RotateRefresh(context.Background(), refresh)
+			results <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		} else if !errors.Is(err, ErrInvalidRefreshToken) {
+			t.Errorf("expected ErrInvalidRefreshToken for losing racers, got %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Errorf("expected exactly one successful rotation, got %d", successes)
+	}
+
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM refresh_tokens").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("expected exactly one token row after concurrent rotation, got %d", count)
+	}
+}
+
+// When the atomic rotation matches no row — a concurrent replay won the
+// exchange — the loser must get ErrInvalidRefreshToken and no successor.
+func TestRotateRefreshAtomicLossMapsToInvalidToken(t *testing.T) {
+	module := newFakeModule(&fakeStore{
+		refreshToken: database.RefreshToken{
+			Token:     "old",
+			UserID:    uuid.New(),
+			ExpiresAt: time.Now().UTC().Add(time.Hour),
+		},
+		rotateRefreshTokenErr: sql.ErrNoRows,
+	})
+
+	if _, _, err := module.RotateRefresh(context.Background(), "old"); !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("expected ErrInvalidRefreshToken when the rotation matches no row, got %v", err)
+	}
+}
+
+// A store failure inside the atomic rotation must surface as a wrapped
+// non-credentials error (the handler maps it to 500), never as an invalid
+// token.
+func TestRotateRefreshStoreFailureIsWrapped(t *testing.T) {
+	storeErr := errors.New("disk full")
+	module := newFakeModule(&fakeStore{
+		refreshToken: database.RefreshToken{
+			Token:     "old",
+			UserID:    uuid.New(),
+			ExpiresAt: time.Now().UTC().Add(time.Hour),
+		},
+		rotateRefreshTokenErr: storeErr,
+	})
+
+	_, _, err := module.RotateRefresh(context.Background(), "old")
+	if !errors.Is(err, storeErr) {
+		t.Fatalf("expected wrapped store error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "rotate refresh token") {
+		t.Errorf("error %q does not carry rotation context", err)
+	}
+	if errors.Is(err, ErrInvalidRefreshToken) {
+		t.Error("store failure must not be reported as an invalid token")
+	}
+}
+
+// Logout on a live token succeeds, marks the row revoked, and makes the token
+// unusable for both rotation and a second logout.
+func TestLogoutRevokesToken(t *testing.T) {
+	module, queries, _ := newTestModule(t)
+	createTestUser(t, queries, "admin", "correct horse")
+
+	_, refresh, err := module.Login(context.Background(), "admin", "correct horse")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := module.Logout(context.Background(), refresh); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, err := queries.GetRefreshToken(context.Background(), refresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.RevokedAt == nil {
+		t.Error("expected the token to be revoked after logout")
+	}
+
+	if _, _, err := module.RotateRefresh(context.Background(), refresh); !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("expected ErrInvalidRefreshToken for a logged-out token, got %v", err)
+	}
+	if err := module.Logout(context.Background(), refresh); !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("expected ErrInvalidRefreshToken for an already-revoked token, got %v", err)
+	}
+}
+
+// Logout on a token that exists but has expired must reject it like an
+// unknown one, not revoke it.
+func TestLogoutRejectsExpiredToken(t *testing.T) {
+	module, queries, db := newTestModule(t)
+	createTestUser(t, queries, "admin", "correct horse")
+
+	_, refresh, err := module.Login(context.Background(), "admin", "correct horse")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec("UPDATE refresh_tokens SET expires_at = datetime('now', '-1 day') WHERE token = ?", refresh); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := module.Logout(context.Background(), refresh); !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("expected ErrInvalidRefreshToken for expired token, got %v", err)
+	}
+}
+
+// A token that matches no row (unknown or already revoked) maps to
+// ErrInvalidRefreshToken.
+func TestLogoutUnknownTokenMapsToInvalidToken(t *testing.T) {
+	module := newFakeModule(&fakeStore{revokeCurrentRefreshTokenErr: sql.ErrNoRows})
+
+	if err := module.Logout(context.Background(), "not-a-real-token"); !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Errorf("expected ErrInvalidRefreshToken, got %v", err)
+	}
+}
+
+// A persistence failure while revoking must surface as a wrapped error, not
+// as an invalid token, so the handler can respond 500 without clearing the
+// cookie.
+func TestLogoutStoreFailureIsWrapped(t *testing.T) {
+	storeErr := errors.New("database unavailable")
+	module := newFakeModule(&fakeStore{revokeCurrentRefreshTokenErr: storeErr})
+
+	err := module.Logout(context.Background(), "some-token")
+	if !errors.Is(err, storeErr) {
+		t.Fatalf("expected wrapped store error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "revoke refresh token") {
+		t.Errorf("error %q does not carry revoke context", err)
+	}
+	if errors.Is(err, ErrInvalidRefreshToken) {
+		t.Error("store failure must not be reported as an invalid token")
 	}
 }
 

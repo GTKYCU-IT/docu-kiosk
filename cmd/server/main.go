@@ -29,7 +29,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	db, err := sql.Open("sqlite", "./data/kiosks.db?_texttotime=1")
+	db, err := sql.Open("sqlite", "./data/kiosks.db?_texttotime=1&_pragma=busy_timeout(5000)")
 	if err != nil {
 		slog.Error("open db", "error", err)
 		os.Exit(1)
