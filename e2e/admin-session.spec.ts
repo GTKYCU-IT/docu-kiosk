@@ -63,13 +63,32 @@ async function setCookieOf(response: Response): Promise<string | undefined> {
   return headers.find(h => h.name.toLowerCase() === 'set-cookie')?.value
 }
 
-async function signIn(page: Page): Promise<void> {
-  await page.goto('/admin/')
-  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
+// Fills the credential form and submits it; the page ends on the active
+// session screen.
+async function submitSignInForm(page: Page): Promise<void> {
   await page.getByLabel('Username').fill(ADMIN_USERNAME)
   await page.getByLabel('Password').fill(ADMIN_PASSWORD)
   await page.getByRole('button', { name: 'Sign in' }).click()
   await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+}
+
+async function signIn(page: Page): Promise<void> {
+  await page.goto('/admin/')
+  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
+  await submitSignInForm(page)
+}
+
+// Signs in and returns the access JWT the /login response issued, for tests
+// that must observe the exact credential the broker handed to the tab. The
+// response waiter is registered before the form is submitted so the /login
+// response cannot slip past it.
+async function signInAndReadAccessJwt(page: Page): Promise<string> {
+  await page.goto('/admin/')
+  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
+  const loginPromise = page.waitForResponse(r => r.url().endsWith('/login') && r.request().method() === 'POST')
+  await submitSignInForm(page)
+  const loginResponse = await loginPromise
+  return (await loginResponse.json()).jwt
 }
 
 test('serves the admin SPA at /admin and /admin/', async ({ page }) => {
@@ -263,17 +282,7 @@ test('concurrent near-expiry restores rotate the cookie exactly once and converg
   // so the concurrent restore race needs the full fifteen-second life budget.
   test.setTimeout(60_000)
 
-  // Sign in manually so the exact access JWT the two tabs share is
-  // observable and its real exp can drive the wait into the window.
-  await page.goto('/admin/')
-  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
-  const loginPromise = page.waitForResponse(r => r.url().endsWith('/login') && r.request().method() === 'POST')
-  await page.getByLabel('Username').fill(ADMIN_USERNAME)
-  await page.getByLabel('Password').fill(ADMIN_PASSWORD)
-  await page.getByRole('button', { name: 'Sign in' }).click()
-  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
-  const loginResponse = await loginPromise
-  const accessJwt = (await loginResponse.json()).jwt
+  const accessJwt = await signInAndReadAccessJwt(page)
 
   const peer = await openAuthenticatedPeerTab(context)
 
@@ -337,15 +346,7 @@ async function inventoryJsReadableStorage(tab: Page): Promise<Record<string, str
 }
 
 test('keeps credentials out of JavaScript-visible and durable storage', async ({ page, context }) => {
-  // Sign in manually so the exact access JWT the login issued is observable.
-  await page.goto('/admin/')
-  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
-  const loginPromise = page.waitForResponse(r => r.url().endsWith('/login') && r.request().method() === 'POST')
-  await page.getByLabel('Username').fill(ADMIN_USERNAME)
-  await page.getByLabel('Password').fill(ADMIN_PASSWORD)
-  await page.getByRole('button', { name: 'Sign in' }).click()
-  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
-  const accessJwt = (await (await loginPromise).json()).jwt
+  const accessJwt = await signInAndReadAccessJwt(page)
 
   // The refresh credential lives for the browser profile alone.
   const refreshToken = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
@@ -401,17 +402,7 @@ test('terminal authentication loss after access-JWT expiry converges every same-
   // clock, so the demand-driven expiry cycle needs room to finish.
   test.setTimeout(60_000)
 
-  // Sign in manually so the exact access JWT the two tabs share is
-  // observable and its real exp can drive the expiry wait.
-  await page.goto('/admin/')
-  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
-  const loginPromise = page.waitForResponse(r => r.url().endsWith('/login') && r.request().method() === 'POST')
-  await page.getByLabel('Username').fill(ADMIN_USERNAME)
-  await page.getByLabel('Password').fill(ADMIN_PASSWORD)
-  await page.getByRole('button', { name: 'Sign in' }).click()
-  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
-  const loginResponse = await loginPromise
-  const accessJwt = (await loginResponse.json()).jwt
+  const accessJwt = await signInAndReadAccessJwt(page)
 
   const peer = await openAuthenticatedPeerTab(context)
 
@@ -536,16 +527,7 @@ test('restoring a third tab while a living peer holds a near-expiry access JWT i
   page,
   context,
 }) => {
-  // Sign in manually so the exact access JWT the tab holds is observable.
-  await page.goto('/admin/')
-  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
-  const loginPromise = page.waitForResponse(r => r.url().endsWith('/login') && r.request().method() === 'POST')
-  await page.getByLabel('Username').fill(ADMIN_USERNAME)
-  await page.getByLabel('Password').fill(ADMIN_PASSWORD)
-  await page.getByRole('button', { name: 'Sign in' }).click()
-  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
-  const loginResponse = await loginPromise
-  const accessJwt = (await loginResponse.json()).jwt
+  const accessJwt = await signInAndReadAccessJwt(page)
 
   const peer = await openAuthenticatedPeerTab(context)
 

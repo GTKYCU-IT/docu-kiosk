@@ -192,6 +192,7 @@ describe("AdminSessionController refresh coordination", () => {
 
 describe("AdminSessionController protected requests", () => {
   it("sends a bearer token and refreshes then retries once after a 401", async () => {
+    const bus = new TestChannelBus();
     const firstToken = testJwt(NOW + 60_000);
     const successorToken = testJwt(NOW + 120_000);
     const fetchMock = vi
@@ -200,7 +201,24 @@ describe("AdminSessionController protected requests", () => {
       .mockResolvedValueOnce(response(401))
       .mockResolvedValueOnce(response(200, { jwt: successorToken }))
       .mockResolvedValueOnce(response(200, { ok: true }));
-    const { session } = createSession(fetchMock);
+    const ownerChannel = bus.open();
+    // Record the owner's outbound broadcasts so the refresh successor's
+    // browser-session epoch is observable.
+    const posted: AdminSessionMessage[] = [];
+    const { session } = createSession(fetchMock, {
+      channel: {
+        postMessage: (message) => {
+          posted.push(message);
+          ownerChannel.postMessage(message);
+        },
+        addEventListener: (type, listener) =>
+          ownerChannel.addEventListener(type, listener),
+        removeEventListener: (type, listener) =>
+          ownerChannel.removeEventListener(type, listener),
+        close: () => ownerChannel.close(),
+      },
+      tabId: "owner",
+    });
     await session.restore();
 
     const result = await session.protectedFetch("/admin/documents", {
@@ -216,6 +234,19 @@ describe("AdminSessionController protected requests", () => {
       `Bearer ${successorToken}`,
     );
     expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    // The coordinated refresh keeps the successor in the same browser-session
+    // epoch: the restore and refresh broadcasts must carry identical epochs.
+    const tokenBroadcasts = posted.filter(
+      (message): message is Extract<AdminSessionMessage, { type: "token" }> =>
+        message.type === "token",
+    );
+    expect(tokenBroadcasts).toHaveLength(2);
+    const [restoreBroadcast, refreshBroadcast] = tokenBroadcasts;
+    expect(restoreBroadcast.jwt).toBe(firstToken);
+    expect(refreshBroadcast.jwt).toBe(successorToken);
+    expect(refreshBroadcast.epoch).toBe(restoreBroadcast.epoch);
+    expect(refreshBroadcast.epoch).not.toBeNull();
   });
 
   it("propagates a refresh 401 as terminal loss without retrying", async () => {
@@ -361,21 +392,34 @@ describe("AdminSessionController cross-tab lifecycle", () => {
     await owner.restore();
     expect(peer.getState()).toEqual({ status: "authenticated" });
 
+    // The owner's restore broadcast pins the current browser-session epoch;
+    // a refresh successor must carry the same epoch, not a later login's.
+    const ownerTokenBroadcast = posted.find(
+      (message): message is Extract<AdminSessionMessage, { type: "token" }> =>
+        message.type === "token",
+    );
+    expect(ownerTokenBroadcast?.type).toBe("token");
+    const sessionEpoch = ownerTokenBroadcast!.epoch;
+
     // The logout request is deferred, leaving the initiating tab signing-out.
     const signingOut = owner.logout();
     expect(owner.getState()).toEqual({ status: "signing-out" });
 
-    // A peer refresh/login broadcasts its token while the logout is pending:
-    // the signing-out tab must not accept it or invalidate its logout.
+    // A peer refresh broadcasts its successor token in the same session
+    // epoch while the logout is pending: the signing-out tab must not accept
+    // it or invalidate its logout, but the ordinary peer adopts it.
+    const successorToken = testJwt(NOW + 120_000);
     bus.open().postMessage({
       type: "token",
       tabId: "intruder",
       requestId: "intruder-broadcast",
       targetTabId: null,
-      jwt: testJwt(NOW + 120_000),
+      jwt: successorToken,
+      epoch: sessionEpoch,
     });
     expect(owner.getState()).toEqual({ status: "signing-out" });
     expect(owner.getAccessToken()).toBe(token);
+    expect(peer.getAccessToken()).toBe(successorToken);
 
     // A token request must go unanswered: the signing-out JWT is soon revoked.
     bus.open().postMessage({
@@ -419,6 +463,7 @@ describe("AdminSessionController cross-tab lifecycle", () => {
       type: "terminal",
       tabId: "peer",
       requestId: "terminal-after-close",
+      epoch: null,
     });
     resolve(response(200, { jwt: testJwt(NOW + 60_000) }));
     await restoring;
@@ -498,5 +543,229 @@ describe("AdminSessionController state transitions", () => {
 
     expect(session.getState()).toEqual({ status: "login", submitting: false });
     expect(session.getAccessToken()).toBeNull();
+  });
+});
+
+describe("AdminSessionController browser-session epoch", () => {
+  it("ignores a stale old-epoch logout after a newer login", async () => {
+    const bus = new TestChannelBus();
+    const firstToken = testJwt(NOW + 60_000);
+    const secondToken = testJwt(NOW + 120_000);
+    const ownerFetch = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, { jwt: firstToken }))
+      .mockResolvedValueOnce(response(204))
+      .mockResolvedValueOnce(response(200, { jwt: secondToken }));
+    const ownerChannel = bus.open();
+    const posted: AdminSessionMessage[] = [];
+    const owner = createSession(ownerFetch, {
+      channel: {
+        postMessage: (message) => {
+          posted.push(message);
+          ownerChannel.postMessage(message);
+        },
+        addEventListener: (type, listener) =>
+          ownerChannel.addEventListener(type, listener),
+        removeEventListener: (type, listener) =>
+          ownerChannel.removeEventListener(type, listener),
+        close: () => ownerChannel.close(),
+      },
+      tabId: "owner",
+    }).session;
+    const peer = createSession(vi.fn(), {
+      channel: bus.open(),
+      tabId: "peer",
+    }).session;
+
+    await owner.restore();
+    await owner.logout();
+    await owner.login("administrator", "secret phrase");
+
+    // The logout broadcast carries the epoch it ended, and the new login
+    // rotates to a fresh epoch.
+    const firstEpoch = posted.find((m) => m.type === "token")?.epoch ?? null;
+    const logoutEpoch = posted.find((m) => m.type === "logout")?.epoch ?? null;
+    const secondEpoch =
+      posted.filter((m) => m.type === "token").at(-1)?.epoch ?? null;
+    expect(logoutEpoch).toBe(firstEpoch);
+    expect(secondEpoch).not.toBe(firstEpoch);
+
+    // A logout and terminal from the superseded epoch must not terminate
+    // tabs that have since logged in again.
+    bus.open().postMessage({
+      type: "logout",
+      tabId: "stale-tab",
+      requestId: "stale-logout",
+      epoch: firstEpoch,
+    });
+    bus.open().postMessage({
+      type: "terminal",
+      tabId: "stale-tab",
+      requestId: "stale-terminal",
+      epoch: firstEpoch,
+    });
+
+    expect(owner.getState()).toEqual({ status: "authenticated" });
+    expect(owner.getAccessToken()).toBe(secondToken);
+    expect(peer.getState()).toEqual({ status: "authenticated" });
+    expect(peer.getAccessToken()).toBe(secondToken);
+  });
+
+  it.each(["terminal", "logout"])(
+    "%s during restoration followed by a late targeted token leaves login state",
+    async (messageType) => {
+      const bus = new TestChannelBus();
+      const ownerChannel = bus.open();
+      const posted: AdminSessionMessage[] = [];
+      const owner = createSession(vi.fn(), {
+        channel: {
+          postMessage: (message) => {
+            posted.push(message);
+            ownerChannel.postMessage(message);
+          },
+          addEventListener: (type, listener) =>
+            ownerChannel.addEventListener(type, listener),
+          removeEventListener: (type, listener) =>
+            ownerChannel.removeEventListener(type, listener),
+          close: () => ownerChannel.close(),
+        },
+        tabId: "owner",
+        peerWaitMs: 10_000,
+      }).session;
+
+      const restoring = owner.restore();
+      const requestId =
+        posted.find((m) => m.type === "token-request")?.requestId ?? "missing";
+      expect(owner.getState()).toEqual({ status: "restoring" });
+
+      // Loss arrives while this tab still has no epoch: the restoration
+      // must stop and every pending waiter must be cancelled.
+      bus.open().postMessage({
+        type: messageType as "terminal" | "logout",
+        tabId: "peer",
+        requestId: `${messageType}-during-restore`,
+        epoch: "stale-epoch",
+      });
+      expect(owner.getState()).toEqual({ status: "login", submitting: false });
+      expect(owner.getAccessToken()).toBeNull();
+
+      // The peer's response for the cancelled request must not resurrect
+      // the terminated session.
+      bus.open().postMessage({
+        type: "token",
+        tabId: "peer",
+        requestId,
+        targetTabId: "owner",
+        jwt: testJwt(NOW + 60_000),
+        epoch: "stale-epoch",
+      });
+      await restoring;
+
+      expect(owner.getState()).toEqual({ status: "login", submitting: false });
+      expect(owner.getAccessToken()).toBeNull();
+    },
+  );
+
+  it("answers a reloaded tab's token request with an epoch only, so its refresh-401 terminal reaches still-open peers", async () => {
+    const bus = new TestChannelBus();
+    let now = NOW;
+    const token = testJwt(NOW + 60_000);
+    const peerFetch = vi.fn().mockResolvedValue(response(200, { jwt: token }));
+    const peerChannel = bus.open();
+    // Record the peer's outbound messages so the epoch-only response is
+    // observable at the wire level.
+    const peerPosted: AdminSessionMessage[] = [];
+    const peer = createSession(peerFetch, {
+      channel: {
+        postMessage: (message) => {
+          peerPosted.push(message);
+          peerChannel.postMessage(message);
+        },
+        addEventListener: (type, listener) =>
+          peerChannel.addEventListener(type, listener),
+        removeEventListener: (type, listener) =>
+          peerChannel.removeEventListener(type, listener),
+        close: () => peerChannel.close(),
+      },
+      tabId: "peer",
+      now: () => now,
+    }).session;
+    await peer.restore();
+
+    // The peer's own restore broadcast pins the shared browser-session epoch.
+    const peerEpoch =
+      peerPosted.find(
+        (message): message is Extract<AdminSessionMessage, { type: "token" }> =>
+          message.type === "token",
+      )?.epoch ?? null;
+    expect(peerEpoch).not.toBeNull();
+
+    // Age the shared JWT inside the five-second freshness cutoff so the
+    // still-open peer must refuse to serve it to a reloaded tab.
+    now += 56_000;
+
+    // A reloaded tab starts with no epoch and no JWT of its own; its restore
+    // must get only the session epoch, never the stale credential.
+    const reloaderChannel = bus.open();
+    const reloaderPosted: AdminSessionMessage[] = [];
+    const reloaderFetch = vi.fn().mockResolvedValue(response(401));
+    const { session: reloader, states: reloaderStates } = createSession(
+      reloaderFetch,
+      {
+        channel: {
+          postMessage: (message) => {
+            reloaderPosted.push(message);
+            reloaderChannel.postMessage(message);
+          },
+          addEventListener: (type, listener) =>
+            reloaderChannel.addEventListener(type, listener),
+          removeEventListener: (type, listener) =>
+            reloaderChannel.removeEventListener(type, listener),
+          close: () => reloaderChannel.close(),
+        },
+        tabId: "reloader",
+        now: () => now,
+      },
+    );
+    await reloader.restore();
+
+    // The peer's responses carry only the epoch, never a jwt field, and the
+    // stale JWT is never served to the reloaded tab.
+    const epochResponses = peerPosted.filter(
+      (message): message is Extract<AdminSessionMessage, { type: "epoch" }> =>
+        message.type === "epoch",
+    );
+    expect(epochResponses.length).toBeGreaterThan(0);
+    for (const epochResponse of epochResponses) {
+      expect(epochResponse.epoch).toBe(peerEpoch);
+      expect(epochResponse.targetTabId).toBe("reloader");
+      expect(epochResponse).not.toHaveProperty("jwt");
+    }
+    expect(
+      peerPosted.some(
+        (message) =>
+          message.type === "token" && message.targetTabId === "reloader",
+      ),
+    ).toBe(false);
+
+    // The credential-free response must not authenticate the reloaded tab:
+    // it goes straight to its own refresh, whose 401 is terminal.
+    expect(reloaderStates.some((state) => state.status === "authenticated")).toBe(
+      false,
+    );
+    expect(reloaderFetch).toHaveBeenCalledTimes(1);
+    expect(reloader.getState()).toEqual({ status: "login", submitting: false });
+    expect(reloader.getAccessToken()).toBeNull();
+
+    // The terminal broadcast carries the learned epoch, so the still-open
+    // peer in that same epoch terminates instead of ignoring it.
+    const terminalBroadcast = reloaderPosted.find(
+      (message): message is Extract<AdminSessionMessage, { type: "terminal" }> =>
+        message.type === "terminal",
+    );
+    expect(terminalBroadcast?.epoch).toBe(peerEpoch);
+    expect(peer.getState()).toEqual({ status: "login", submitting: false });
+    expect(peer.getAccessToken()).toBeNull();
+    expect(peerFetch).toHaveBeenCalledTimes(1);
   });
 });

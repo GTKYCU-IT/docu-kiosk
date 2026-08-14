@@ -15,9 +15,11 @@ export type AdminSessionMessage =
       requestId: string;
       targetTabId: string | null;
       jwt: string;
+      epoch: string | null;
     }
-  | { type: "terminal"; tabId: string; requestId: string }
-  | { type: "logout"; tabId: string; requestId: string };
+  | { type: "epoch"; tabId: string; requestId: string; targetTabId: string; epoch: string }
+  | { type: "terminal"; tabId: string; requestId: string; epoch: string | null }
+  | { type: "logout"; tabId: string; requestId: string; epoch: string | null };
 
 export interface AdminSessionChannel {
   postMessage(message: AdminSessionMessage): void;
@@ -72,6 +74,7 @@ export class AdminSessionController {
   private readonly peerWaiters = new Map<string, PeerWaiter>();
   private state: AdminSessionState = { status: "restoring" };
   private jwt: string | null = null;
+  private epoch: string | null = null;
   private operation = 0;
   private closed = false;
 
@@ -81,17 +84,26 @@ export class AdminSessionController {
 
     if (message.type === "token-request") {
       // A signing-out tab must not serve its soon-revoked JWT to peers.
-      if (
-        this.state.status !== "signing-out" &&
-        this.jwt !== null &&
-        this.isFreshJwt(this.jwt)
-      ) {
+      if (this.state.status === "signing-out") return;
+      if (this.jwt !== null && this.isFreshJwt(this.jwt)) {
         this.postMessage({
           type: "token",
           tabId: this.tabId,
           requestId: message.requestId,
           targetTabId: message.tabId,
           jwt: this.jwt,
+          epoch: this.epoch,
+        });
+      } else if (this.epoch !== null) {
+        // No fresh JWT to share, but the browser-session epoch still
+        // identifies the session for a reloaded peer; the stale JWT is
+        // not exposed.
+        this.postMessage({
+          type: "epoch",
+          tabId: this.tabId,
+          requestId: message.requestId,
+          targetTabId: message.tabId,
+          epoch: this.epoch,
         });
       }
       return;
@@ -100,14 +112,19 @@ export class AdminSessionController {
     if (message.type === "token") {
       // Peer token broadcasts must not invalidate a pending logout.
       if (this.state.status === "signing-out") return;
-      if (message.targetTabId !== null && message.targetTabId !== this.tabId) return;
-      if (!this.isFreshJwt(message.jwt)) return;
 
       const waiter = this.peerWaiters.get(message.requestId);
+      if (message.targetTabId !== null) {
+        // Targeted peer responses are honored only while the matching
+        // request waiter remains live; a late response must not resurrect
+        // a session that has since terminated.
+        if (waiter === undefined || message.targetTabId !== this.tabId) return;
+      }
+      if (!this.isFreshJwt(message.jwt)) return;
       if (waiter !== undefined && waiter.rejectedJwt === message.jwt) return;
       if (message.targetTabId === null) ++this.operation;
 
-      this.acceptToken(message.jwt, false);
+      this.acceptToken(message.jwt, false, message.epoch);
       if (waiter !== undefined) {
         clearTimeout(waiter.timer);
         this.peerWaiters.delete(message.requestId);
@@ -116,6 +133,27 @@ export class AdminSessionController {
       return;
     }
 
+    if (message.type === "epoch") {
+      // An epoch-only response is honored only while the matching request
+      // waiter remains live and is addressed to this tab, like a targeted
+      // token; a late response must not resurrect a terminated session.
+      const waiter = this.peerWaiters.get(message.requestId);
+      if (waiter === undefined || message.targetTabId !== this.tabId) return;
+      // Adopt the browser-session epoch only when this tab has none yet;
+      // an existing local epoch is authoritative.
+      if (this.epoch === null) this.epoch = message.epoch;
+      clearTimeout(waiter.timer);
+      this.peerWaiters.delete(message.requestId);
+      // No JWT to take: the coordinated refresh must proceed.
+      waiter.resolve(null);
+      return;
+    }
+
+    // Terminal/logout messages terminate only tabs still in the sender's
+    // browser-session epoch, so stale messages cannot kill a later login.
+    // A tab with no epoch yet (restoring) has no session to protect and
+    // honors the message, stopping the in-flight restoration.
+    if (this.epoch !== null && message.epoch !== this.epoch) return;
     this.localTerminalTransition();
   };
 
@@ -149,7 +187,7 @@ export class AdminSessionController {
     const peerJwt = await this.requestPeerToken(null);
     if (!this.isCurrent(operation)) return;
     if (peerJwt !== null) {
-      this.acceptToken(peerJwt, false);
+      this.acceptToken(peerJwt, false, this.epoch);
       return;
     }
 
@@ -182,7 +220,7 @@ export class AdminSessionController {
         const jwt = await this.readJwt(response);
         if (!this.isCurrent(operation)) return;
         if (jwt !== null && this.isFreshJwt(jwt)) {
-          this.acceptToken(jwt, true);
+          this.acceptToken(jwt, true, this.createId());
           return;
         }
       }
@@ -213,12 +251,14 @@ export class AdminSessionController {
       if (!this.isCurrent(operation)) return;
 
       if (response.status === 204) {
+        const epoch = this.epoch;
         this.clearProtectedState();
         this.update({ status: "login", submitting: false });
         this.postMessage({
           type: "logout",
           tabId: this.tabId,
           requestId: this.createId(),
+          epoch,
         });
         return;
       }
@@ -243,7 +283,7 @@ export class AdminSessionController {
 
     if (this.jwt === null || !this.isFreshJwt(this.jwt)) {
       const operation = ++this.operation;
-      this.clearProtectedState();
+      this.clearAccessToken();
       await this.refreshWithCoordination(operation, null);
     }
 
@@ -258,7 +298,7 @@ export class AdminSessionController {
     if (this.closed || response.status !== 401) return response;
 
     const operation = ++this.operation;
-    if (this.jwt === rejectedJwt) this.clearProtectedState();
+    if (this.jwt === rejectedJwt) this.clearAccessToken();
     await this.refreshWithCoordination(operation, rejectedJwt);
 
     if (this.closed) throw new Error("The admin session is closed");
@@ -275,11 +315,14 @@ export class AdminSessionController {
     if (this.closed) return;
 
     // Local-origin loss: this tab's own fetch failed, so peers must hear about it.
+    // Capture the epoch first: localTerminalTransition clears it.
+    const epoch = this.epoch;
     this.localTerminalTransition();
     this.postMessage({
       type: "terminal",
       tabId: this.tabId,
       requestId: this.createId(),
+      epoch,
     });
   }
 
@@ -317,7 +360,7 @@ export class AdminSessionController {
       const peerJwt = await this.requestPeerToken(rejectedJwt);
       if (!this.isCurrent(operation)) return;
       if (peerJwt !== null) {
-        this.acceptToken(peerJwt, false);
+        this.acceptToken(peerJwt, false, this.epoch);
         return;
       }
 
@@ -348,7 +391,7 @@ export class AdminSessionController {
         const jwt = await this.readJwt(response);
         if (!this.isCurrent(operation)) return;
         if (jwt !== null && this.isFreshJwt(jwt)) {
-          this.acceptToken(jwt, true);
+          this.acceptToken(jwt, true, this.epoch ?? this.createId());
           return;
         }
         this.clearProtectedState();
@@ -388,10 +431,15 @@ export class AdminSessionController {
     return promise;
   }
 
-  private acceptToken(jwt: string, broadcast: boolean): void {
+  private acceptToken(
+    jwt: string,
+    broadcast: boolean,
+    epoch: string | null,
+  ): void {
     if (this.closed || !this.isFreshJwt(jwt)) return;
 
     this.jwt = jwt;
+    if (epoch !== null) this.epoch = epoch;
     this.update({ status: "authenticated" });
     if (broadcast) {
       this.postMessage({
@@ -400,6 +448,7 @@ export class AdminSessionController {
         requestId: this.createId(),
         targetTabId: null,
         jwt,
+        epoch: this.epoch,
       });
     }
   }
@@ -469,10 +518,28 @@ export class AdminSessionController {
       };
     }
     if (message.type === "terminal" || message.type === "logout") {
+      const epoch = message.epoch;
+      if (epoch === null || typeof epoch === "string") {
+        return {
+          type: message.type,
+          tabId: message.tabId,
+          requestId: message.requestId,
+          epoch,
+        };
+      }
+      return null;
+    }
+    if (
+      message.type === "epoch" &&
+      typeof message.targetTabId === "string" &&
+      typeof message.epoch === "string"
+    ) {
       return {
-        type: message.type,
+        type: "epoch",
         tabId: message.tabId,
         requestId: message.requestId,
+        targetTabId: message.targetTabId,
+        epoch: message.epoch,
       };
     }
     if (
@@ -480,13 +547,18 @@ export class AdminSessionController {
       typeof message.jwt === "string" &&
       (message.targetTabId === null || typeof message.targetTabId === "string")
     ) {
-      return {
-        type: "token",
-        tabId: message.tabId,
-        requestId: message.requestId,
-        targetTabId: message.targetTabId,
-        jwt: message.jwt,
-      };
+      const epoch = message.epoch;
+      if (epoch === null || typeof epoch === "string") {
+        return {
+          type: "token",
+          tabId: message.tabId,
+          requestId: message.requestId,
+          targetTabId: message.targetTabId,
+          jwt: message.jwt,
+          epoch,
+        };
+      }
+      return null;
     }
     return null;
   }
@@ -530,6 +602,17 @@ export class AdminSessionController {
 
   private clearProtectedState(): void {
     this.jwt = null;
+    this.epoch = null;
+  }
+
+  // A rejected or near-expiry access JWT is discarded before a coordinated
+  // refresh while the browser-session epoch survives: refresh is a continuity
+  // transition, not a session change. A refresh 401 can then broadcast the
+  // epoch it ended, and a successor token keeps the same epoch. Definitive
+  // transitions (restore, logout, terminal loss, close, unavailable) still
+  // use clearProtectedState.
+  private clearAccessToken(): void {
+    this.jwt = null;
   }
 
   // Terminal loss observed by this tab (own fetch or a peer terminal/logout
@@ -537,6 +620,13 @@ export class AdminSessionController {
   // Broadcasting is the caller's choice so peer-derived messages stay local.
   private localTerminalTransition(): void {
     ++this.operation;
+    // Resolve and drop every pending peer waiter before changing state so a
+    // late targeted token response cannot resurrect the terminated session.
+    for (const waiter of this.peerWaiters.values()) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(null);
+    }
+    this.peerWaiters.clear();
     this.clearProtectedState();
     this.update({ status: "login", submitting: false });
   }
