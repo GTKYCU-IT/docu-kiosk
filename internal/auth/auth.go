@@ -4,6 +4,7 @@ package auth
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -34,7 +35,8 @@ type store interface {
 	GetUser(ctx context.Context, id uuid.UUID) (database.User, error)
 	GetRefreshToken(ctx context.Context, token string) (database.RefreshToken, error)
 	MakeRefreshToken(ctx context.Context, arg database.MakeRefreshTokenParams) (database.RefreshToken, error)
-	RevokeRefreshToken(ctx context.Context, token string) error
+	RotateRefreshToken(ctx context.Context, arg database.RotateRefreshTokenParams) (database.RefreshToken, error)
+	RevokeCurrentRefreshToken(ctx context.Context, token string) (database.RefreshToken, error)
 }
 
 // TokenLifetimes bundles the two token lifetimes AuthModule issues tokens
@@ -123,8 +125,12 @@ func (a *AuthModule) Login(ctx context.Context, username, password string) (jwt 
 }
 
 // RotateRefresh exchanges a valid refresh token for a new JWT and a new
-// refresh token. The old refresh token is revoked (rotation), so a stolen
-// token can only be used once.
+// refresh token. The old token is read to identify its user, the JWT is
+// signed, and then one conditional UPDATE atomically replaces the old token
+// with a random successor; a revoked, expired, or replayed token matches no
+// row and yields no successor. The atomic exchange, not the preceding read,
+// decides the race: concurrent replays of the same token produce at most one
+// successor.
 func (a *AuthModule) RotateRefresh(ctx context.Context, token string) (jwt string, newRefreshToken string, err error) {
 	rt, err := a.store.GetRefreshToken(ctx, token)
 	if err != nil {
@@ -140,16 +146,33 @@ func (a *AuthModule) RotateRefresh(ctx context.Context, token string) (jwt strin
 		return "", "", err
 	}
 
-	if err := a.store.RevokeRefreshToken(ctx, rt.Token); err != nil {
-		return "", "", fmt.Errorf("revoke refresh token: %w", err)
-	}
-
-	newRT, err := a.newRefreshToken(ctx, rt.UserID)
+	newRT, err := a.store.RotateRefreshToken(ctx, database.RotateRefreshTokenParams{
+		Token:     token,
+		ExpiresAt: time.Now().UTC().Add(a.lifetimes.RefreshTTL),
+	})
 	if err != nil {
-		return "", "", err
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", ErrInvalidRefreshToken
+		}
+		return "", "", fmt.Errorf("rotate refresh token: %w", err)
 	}
 
 	return jwt, newRT.Token, nil
+}
+
+// Logout revokes the given refresh token so it can no longer be rotated.
+// Only a live, unexpired token matches the conditional revoke; an unknown,
+// already-revoked, or expired token maps to ErrInvalidRefreshToken, while a
+// persistence failure surfaces as a wrapped error so handlers can tell the
+// two apart.
+func (a *AuthModule) Logout(ctx context.Context, token string) error {
+	if _, err := a.store.RevokeCurrentRefreshToken(ctx, token); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrInvalidRefreshToken
+		}
+		return fmt.Errorf("revoke refresh token: %w", err)
+	}
+	return nil
 }
 
 // Validate checks a JWT bearer token and returns the authenticated user.

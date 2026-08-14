@@ -25,9 +25,24 @@ SELECT
 FROM refresh_tokens
 WHERE token = ?;
 
--- name: RevokeRefreshToken :exec
+-- name: RotateRefreshToken :one
+UPDATE refresh_tokens
+SET
+    token = hex(randomblob(32)),
+    created_at = datetime('now'),
+    updated_at = datetime('now'),
+    expires_at = ?
+WHERE token = ?
+  AND revoked_at IS NULL
+  AND expires_at > datetime('now')
+RETURNING *;
+
+-- name: RevokeCurrentRefreshToken :one
 UPDATE refresh_tokens
 SET
     revoked_at = datetime('now'),
     updated_at = datetime('now')
-WHERE token = ?;
+WHERE token = ?
+  AND revoked_at IS NULL
+  AND expires_at > datetime('now')
+RETURNING *;

@@ -1,0 +1,5 @@
+# Keep Administrator refresh credentials in Broker-custodied session cookies
+
+Administrator sessions use a 15-second access JWT held only in page memory and a rotating refresh credential held only by the Broker and a host-only `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/` browser-session cookie. Login and refresh return only the access JWT; refresh accepts only the cookie; logout revokes the current profile credential before clearing the cookie. This keeps the long-lived credential outside application JavaScript and durable browser storage while preserving independent sessions in other profiles and devices.
+
+A future cross-tab coordinator must preserve that custody model: request an existing in-memory access JWT from peer tabs before refreshing, serialize cookie rotation under one same-origin lock, distribute successor access JWTs only through ephemeral same-origin messages, and broadcast terminal authentication loss or confirmed sign-out so every tab clears protected in-memory state. It must not persist either credential, rotate while idle, broaden logout beyond the current browser-profile credential, or report sign-out before Broker revocation succeeds.

@@ -1,12 +1,19 @@
 ### 
 
-# Run the `login` request first — it stores `jwt` and `refresh_token` as
-# kulala globals that the requests below consume via {{jwt}} / {{refresh_token}}.
-# # NOTE: do NOT use `run #login` on these blocks. In this kulala-core version a
+# Administrator session contract: login and refresh return ONLY the access
+# JWT in the body; the rotating refresh credential travels exclusively in the
+# `refresh_token` cookie (Path=/, HttpOnly, Secure, SameSite=Strict, no
+# Domain/Max-Age/Expires). The requests below therefore send the credential
+# as a cookie, never as an Authorization header.
+#
+# The response scripts parse Set-Cookie manually so the blocks work without a
+# cookie jar; with `kulala run --cookie-jar <file>`, the jar stores the same
+# cookie automatically.
+#
+# NOTE: do NOT use `run #login` on these blocks. In this kulala-core version a
 # `run #<name>` directive runs the named request *instead of* the block's own
 # request, so the post-response script ends up asserting against login's 200
 # response and every test passes regardless of the code you assert.
-
 
 ### login
 
@@ -23,7 +30,17 @@ Content-Type: application/json
 
 > {%
   client.global.set("jwt", response.body.jwt);
-  client.global.set("refresh_token", response.body.refresh_token);
+  const setCookie = response.headers["set-cookie"];
+  const raw = Array.isArray(setCookie) ? setCookie.join(";") : (setCookie || "");
+  const match = /refresh_token=([^;]+)/.exec(raw);
+  if (match) client.global.set("refresh_token", match[1]);
+  client.test("login returns only the access jwt in the body", function() {
+    client.assert(response.body.jwt, "Expected a jwt in the response body")
+    client.assert(!response.body.refresh_token, "refresh_token must not appear in the body")
+  })
+  client.test("login sets the refresh_token session cookie", function() {
+    client.assert(!!match, "Expected a refresh_token cookie, got Set-Cookie: " + raw)
+  })
 %}
 
 
@@ -65,41 +82,73 @@ Authorization: Bearer bad-token
 
 ### refresh
 
-# A valid refresh token returns a new jwt + refresh token (200).
+# A valid refresh cookie returns a new jwt + a rotated refresh cookie (200).
 
 @hostname = localhost
 @port = 8080
 
 POST http://{{hostname}}:{{port}}/refresh HTTP/1.1
-Authorization: Bearer {{refresh_token}}
+Cookie: refresh_token={{refresh_token}}
 
 > {%
   client.test("refresh succeeds", function() {
     client.assert(response.status == 200, "Expected 200, got " + response.status)
   })
-  client.test("issues a new jwt", function() {
+  client.test("issues a new jwt only", function() {
     client.assert(response.body.jwt, "Expected a jwt in the response body")
+    client.assert(!response.body.refresh_token, "refresh_token must not appear in the body")
   })
-  client.test("issues a new refresh token", function() {
-    client.assert(response.body.refresh_token, "Expected a refresh_token in the response body")
+  // Preserve the rotated-away value so the replay block below can prove it
+  // is dead.
+  client.global.set("revoked_refresh_token", client.global.get("refresh_token"));
+  const setCookie = response.headers["set-cookie"];
+  const raw = Array.isArray(setCookie) ? setCookie.join(";") : (setCookie || "");
+  const match = /refresh_token=([^;]+)/.exec(raw);
+  if (match) client.global.set("refresh_token", match[1]);
+  client.test("rotates the refresh cookie", function() {
+    client.assert(!!match, "Expected a rotated refresh_token cookie, got Set-Cookie: " + raw)
   })
 %}
 
 
 ### refresh-revoked
 
-# The previous refresh token was rotated/revoked by the `refresh` request above,
-# so replaying the same {{refresh_token}} must be rejected (401).
+# The previous refresh token was rotated away by the `refresh` request above,
+# so replaying it must be rejected (401).
 # Run `login` -> `refresh` -> `refresh-revoked` in that order.
 
 @hostname = localhost
 @port = 8080
 
 POST http://{{hostname}}:{{port}}/refresh HTTP/1.1
-Authorization: Bearer {{refresh_token}}
+Cookie: refresh_token={{revoked_refresh_token}}
 
 > {%
   client.test("a rotated refresh token is rejected", function() {
     client.assert(response.status == 401, "Expected 401, got " + response.status)
+  })
+%}
+
+
+### logout
+
+# Signs out: the broker revokes the credential server-side and only then
+# clears the cookie (204). Re-running this block replays the revoked cookie
+# and must fail with 401.
+
+@hostname = localhost
+@port = 8080
+
+POST http://{{hostname}}:{{port}}/logout HTTP/1.1
+Cookie: refresh_token={{refresh_token}}
+
+> {%
+  client.test("logout succeeds", function() {
+    client.assert(response.status == 204, "Expected 204, got " + response.status)
+  })
+  const setCookie = response.headers["set-cookie"];
+  const raw = Array.isArray(setCookie) ? setCookie.join(";") : (setCookie || "");
+  client.test("logout clears the refresh cookie", function() {
+    client.assert(/refresh_token=;/.test(raw), "Expected a clearing refresh_token cookie, got Set-Cookie: " + raw)
   })
 %}

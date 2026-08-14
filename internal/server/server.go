@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -24,6 +25,11 @@ import (
 	"github.com/felixge/httpsnoop"
 	"github.com/google/uuid"
 )
+
+// WebDistDir is the built SPA directory, resolved relative to the process
+// working directory. Exported so the e2e broker can check the same directory
+// the broker serves without hardcoding the path a second time.
+const WebDistDir = "web/dist"
 
 // kioskHub is the session-module surface the HTTP handlers consume.
 type kioskHub interface {
@@ -119,6 +125,10 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 	mux.HandleFunc("GET /protected", s.ensureAuthMiddleware(s.handleProtected))
 	mux.HandleFunc("POST /login", s.handleLogin)
 	mux.HandleFunc("POST /refresh", s.handleRefresh)
+	mux.HandleFunc("POST /logout", s.handleLogout)
+
+	mux.HandleFunc("/admin", s.handleAdminIndex)
+	mux.HandleFunc("/admin/", s.handleAdminIndex)
 
 	mux.HandleFunc("GET /api/version", s.handleVersion)
 	mux.HandleFunc("POST /api/kiosks", s.handleRegister)
@@ -126,7 +136,7 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 	mux.HandleFunc("POST /api/kiosks/{id}/sessions", s.handlePush)
 	mux.HandleFunc("/ws", s.handleWS)
 
-	mux.Handle("/", http.FileServer(http.Dir("./web/dist")))
+	mux.Handle("/", http.FileServer(http.Dir(WebDistDir)))
 
 	s.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
@@ -134,6 +144,19 @@ func NewServer(cfg config.Config, db *database.Queries) (*server, error) {
 	}
 
 	return s, nil
+}
+
+// handleAdminIndex serves the administrator SPA entry for /admin and
+// /admin/*. Only navigation methods (GET, HEAD) are answered; everything else
+// is rejected with 405 so the fallback can never shadow a future admin API or
+// answer mutation requests meant for kiosk routes.
+func (s *server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	http.ServeFile(w, r, filepath.Join(WebDistDir, "index.html"))
 }
 
 func (s *server) loggingMiddleware(next http.Handler) http.Handler {
