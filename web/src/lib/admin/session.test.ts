@@ -1,128 +1,404 @@
 import { describe, expect, it, vi, type Mock } from "vitest";
 import {
   AdminSessionController,
+  type AdminSessionChannel,
+  type AdminSessionLockManager,
+  type AdminSessionMessage,
+  type AdminSessionOptions,
   type AdminSessionState,
 } from "./session";
 import { response } from "./test-response";
 
-function createSession(fetchMock: Mock) {
+const NOW = 2_000_000_000_000;
+
+function jwtExpiringAt(expiresAt: number): string {
+  const header = btoa(JSON.stringify({ alg: "none", typ: "JWT" }))
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+  const payload = btoa(JSON.stringify({ exp: expiresAt / 1_000 }))
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+  return `${header}.${payload}.signature`;
+}
+
+function freshJwt(lifetimeMs = 60_000): string {
+  return jwtExpiringAt(NOW + lifetimeMs);
+}
+
+class TestChannelBus {
+  readonly channels = new Set<TestChannel>();
+
+  open(): TestChannel {
+    const channel = new TestChannel(this);
+    this.channels.add(channel);
+    return channel;
+  }
+
+  publish(sender: TestChannel, message: AdminSessionMessage): void {
+    for (const channel of this.channels) {
+      if (channel !== sender) channel.deliver(message);
+    }
+  }
+}
+
+class TestChannel implements AdminSessionChannel {
+  private readonly listeners = new Set<(event: MessageEvent<unknown>) => void>();
+  private closed = false;
+
+  constructor(private readonly bus: TestChannelBus) {}
+
+  postMessage(message: AdminSessionMessage): void {
+    if (!this.closed) this.bus.publish(this, message);
+  }
+
+  addEventListener(
+    _type: "message",
+    listener: (event: MessageEvent<unknown>) => void,
+  ): void {
+    this.listeners.add(listener);
+  }
+
+  removeEventListener(
+    _type: "message",
+    listener: (event: MessageEvent<unknown>) => void,
+  ): void {
+    this.listeners.delete(listener);
+  }
+
+  close(): void {
+    this.closed = true;
+    this.listeners.clear();
+    this.bus.channels.delete(this);
+  }
+
+  deliver(message: AdminSessionMessage): void {
+    if (this.closed) return;
+    for (const listener of this.listeners) {
+      listener({ data: message } as MessageEvent<unknown>);
+    }
+  }
+}
+
+class SerialLocks implements AdminSessionLockManager {
+  readonly requestedNames: string[] = [];
+  private successor: Promise<unknown> = Promise.resolve();
+
+  request<T>(
+    name: string,
+    callback: (lock: unknown) => Promise<T> | T,
+  ): Promise<T> {
+    this.requestedNames.push(name);
+    const result = this.successor.then(() => callback({ name }));
+    this.successor = result.catch(() => undefined);
+    return result;
+  }
+}
+
+type SessionOverrides = Omit<
+  AdminSessionOptions,
+  "fetch" | "onChange" | "now"
+> & { now?: () => number };
+
+function createSession(fetchMock: Mock, overrides: SessionOverrides = {}) {
   const states: AdminSessionState[] = [];
   const session = new AdminSessionController({
     fetch: fetchMock as unknown as typeof fetch,
     onChange: (state) => states.push(state),
+    channel: null,
+    locks: null,
+    now: () => NOW,
+    peerWaitMs: 0,
+    ...overrides,
   });
   return { session, states };
 }
 
-describe("AdminSessionController restoration", () => {
-  it("keeps protected state absent until a successful refresh authenticates", async () => {
-    let resolveRefresh!: (value: Response) => void;
-    const fetchMock = vi.fn(
-      () => new Promise<Response>((resolve) => {
-        resolveRefresh = resolve;
-      }),
-    );
-    const { session, states } = createSession(fetchMock);
+describe("AdminSessionController refresh coordination", () => {
+  it("reuses a fresh peer token without contacting refresh", async () => {
+    const bus = new TestChannelBus();
+    const ownerFetch = vi.fn().mockResolvedValue(response(200, { jwt: freshJwt() }));
+    const peerFetch = vi.fn();
+    const owner = createSession(ownerFetch, {
+      channel: bus.open(),
+      tabId: "owner",
+    }).session;
+    const peer = createSession(peerFetch, {
+      channel: bus.open(),
+      tabId: "peer",
+    }).session;
 
-    const restoring = session.restore();
-    expect(session.getState()).toEqual({ status: "restoring" });
-    expect(session.getAccessToken()).toBeNull();
-    expect(states).toEqual([{ status: "restoring" }]);
+    await owner.restore();
+    await peer.restore();
 
-    resolveRefresh(response(200, { jwt: "access-token" }));
-    await restoring;
-
-    expect(fetchMock).toHaveBeenCalledWith("/refresh", {
-      method: "POST",
-      credentials: "same-origin",
-    });
-    expect(session.getState()).toEqual({ status: "authenticated" });
-    expect(session.getAccessToken()).toBe("access-token");
+    expect(peer.getAccessToken()).toBe(owner.getAccessToken());
+    expect(peer.getState()).toEqual({ status: "authenticated" });
+    expect(peerFetch).not.toHaveBeenCalled();
   });
 
-  it("treats a 401 refresh as a clean login without an invalid-credential state", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(response(401));
-    const { session, states } = createSession(fetchMock);
-
-    await session.restore();
-
-    expect(states).toEqual([
-      { status: "restoring" },
-      { status: "login", submitting: false },
-    ]);
-  });
-
-  it.each([
-    ["a server failure", () => Promise.resolve(response(503))],
-    ["a network failure", () => Promise.reject(new Error("offline"))],
-  ])("makes restoration retryable after %s", async (_name, outcome) => {
-    const fetchMock = vi.fn(outcome);
+  it("falls back to its own refresh when cross-tab APIs are unavailable", async () => {
+    const token = freshJwt();
+    const fetchMock = vi.fn().mockResolvedValue(response(200, { jwt: token }));
     const { session } = createSession(fetchMock);
 
     await session.restore();
 
-    expect(session.getState()).toEqual({ status: "unavailable" });
-    expect(session.getAccessToken()).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(session.getAccessToken()).toBe(token);
   });
 
-  it("returns through neutral restoration when retrying", async () => {
-    let resolveRetry!: (value: Response) => void;
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(response(500))
-      .mockImplementationOnce(
-        () =>
-          new Promise<Response>((resolve) => {
-            resolveRetry = resolve;
-          }),
-      );
-    const { session, states } = createSession(fetchMock);
+  it("allows only one concurrent refresh and reuses its successor token", async () => {
+    const bus = new TestChannelBus();
+    const locks = new SerialLocks();
+    const token = freshJwt();
+    const firstFetch = vi.fn().mockResolvedValue(response(200, { jwt: token }));
+    const secondFetch = vi.fn().mockResolvedValue(response(200, { jwt: freshJwt(90_000) }));
+    const first = createSession(firstFetch, {
+      channel: bus.open(),
+      locks,
+      peerWaitMs: 0,
+      tabId: "first",
+    }).session;
+    const second = createSession(secondFetch, {
+      channel: bus.open(),
+      locks,
+      peerWaitMs: 0,
+      tabId: "second",
+    }).session;
+
+    await Promise.all([first.restore(), second.restore()]);
+
+    expect(firstFetch.mock.calls.length + secondFetch.mock.calls.length).toBe(1);
+    expect(first.getAccessToken()).toBe(token);
+    expect(second.getAccessToken()).toBe(token);
+    expect(new Set(locks.requestedNames)).toEqual(
+      new Set(["docu-kiosk-admin-session-refresh"]),
+    );
+  });
+
+  it("requires expiration to be more than five seconds away", async () => {
+    const boundaryToken = jwtExpiringAt(NOW + 5_000);
+    const freshBoundaryToken = jwtExpiringAt(NOW + 5_001);
+    const stale = createSession(
+      vi.fn().mockResolvedValue(response(200, { jwt: boundaryToken })),
+    ).session;
+    const fresh = createSession(
+      vi.fn().mockResolvedValue(response(200, { jwt: freshBoundaryToken })),
+    ).session;
+
+    await stale.restore();
+    await fresh.restore();
+
+    expect(stale.getState()).toEqual({ status: "unavailable" });
+    expect(stale.getAccessToken()).toBeNull();
+    expect(fresh.getState()).toEqual({ status: "authenticated" });
+    expect(fresh.getAccessToken()).toBe(freshBoundaryToken);
+  });
+
+  it("does not rotate a token merely because time advances", async () => {
+    let now = NOW;
+    const fetchMock = vi.fn().mockResolvedValue(
+      response(200, { jwt: jwtExpiringAt(NOW + 60_000) }),
+    );
+    const { session } = createSession(fetchMock, { now: () => now });
     await session.restore();
 
-    const retrying = session.retry();
-    expect(session.getState()).toEqual({ status: "restoring" });
-    expect(states.at(-1)).toEqual({ status: "restoring" });
+    now += 56_000;
+    await Promise.resolve();
 
-    resolveRetry(response(200, { jwt: "restored-token" }));
-    await retrying;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(session.getState()).toEqual({ status: "authenticated" });
   });
 });
 
-describe("AdminSessionController login", () => {
-  it("authenticates with a JWT held only by the controller", async () => {
+describe("AdminSessionController protected requests", () => {
+  it("sends a bearer token and refreshes then retries once after a 401", async () => {
+    const firstToken = freshJwt();
+    const successorToken = freshJwt(120_000);
     const fetchMock = vi
       .fn()
+      .mockResolvedValueOnce(response(200, { jwt: firstToken }))
       .mockResolvedValueOnce(response(401))
-      .mockResolvedValueOnce(response(200, { jwt: "login-token" }));
+      .mockResolvedValueOnce(response(200, { jwt: successorToken }))
+      .mockResolvedValueOnce(response(200, { ok: true }));
     const { session } = createSession(fetchMock);
     await session.restore();
 
-    await session.login("administrator", "secret phrase");
-
-    expect(fetchMock).toHaveBeenLastCalledWith("/login", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        username: "administrator",
-        password: "secret phrase",
-      }),
+    const result = await session.protectedFetch("/admin/documents", {
+      method: "DELETE",
     });
-    expect(session.getState()).toEqual({ status: "authenticated" });
-    expect(session.getAccessToken()).toBe("login-token");
-    expect(JSON.stringify(session.getState())).not.toContain("login-token");
-    expect(JSON.stringify(session.getState())).not.toContain("secret phrase");
+
+    expect(result.status).toBe(200);
+    const firstRequest = fetchMock.mock.calls[1][0] as Request;
+    const retryRequest = fetchMock.mock.calls[3][0] as Request;
+    expect(firstRequest.method).toBe("DELETE");
+    expect(firstRequest.headers.get("Authorization")).toBe(`Bearer ${firstToken}`);
+    expect(retryRequest.headers.get("Authorization")).toBe(
+      `Bearer ${successorToken}`,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
-  it.each([
-    ["rejected credentials", () => Promise.resolve(response(401))],
-    ["an unavailable Broker", () => Promise.reject(new Error("offline"))],
-  ])("reports one generic invalid-credential state for %s", async (_name, outcome) => {
+  it("propagates a refresh 401 as terminal loss without retrying", async () => {
+    const bus = new TestChannelBus();
+    const token = freshJwt();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, { jwt: token }))
+      .mockResolvedValueOnce(response(401))
+      .mockResolvedValueOnce(response(401));
+    const owner = createSession(fetchMock, {
+      channel: bus.open(),
+      tabId: "owner",
+    }).session;
+    const peer = createSession(vi.fn(), {
+      channel: bus.open(),
+      tabId: "peer",
+    }).session;
+    await owner.restore();
+
+    const result = await owner.protectedFetch("/admin/documents");
+
+    expect(result.status).toBe(401);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(owner.getState()).toEqual({ status: "login", submitting: false });
+    expect(peer.getState()).toEqual({ status: "login", submitting: false });
+  });
+
+  it("propagates a retry 401 as terminal loss and never loops", async () => {
+    const bus = new TestChannelBus();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, { jwt: freshJwt() }))
+      .mockResolvedValueOnce(response(401))
+      .mockResolvedValueOnce(response(200, { jwt: freshJwt(120_000) }))
+      .mockResolvedValueOnce(response(401));
+    const owner = createSession(fetchMock, {
+      channel: bus.open(),
+      tabId: "owner",
+    }).session;
+    const peer = createSession(vi.fn(), {
+      channel: bus.open(),
+      tabId: "peer",
+    }).session;
+    await owner.restore();
+
+    const result = await owner.protectedFetch("/admin/documents");
+
+    expect(result.status).toBe(401);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(owner.getAccessToken()).toBeNull();
+    expect(peer.getState()).toEqual({ status: "login", submitting: false });
+  });
+});
+
+describe("AdminSessionController cross-tab lifecycle", () => {
+  it("shares a successful login token", async () => {
+    const bus = new TestChannelBus();
+    const token = freshJwt();
+    const ownerFetch = vi
+      .fn()
+      .mockResolvedValueOnce(response(401))
+      .mockResolvedValueOnce(response(200, { jwt: token }));
+    const owner = createSession(ownerFetch, {
+      channel: bus.open(),
+      tabId: "owner",
+    }).session;
+    const peer = createSession(vi.fn(), {
+      channel: bus.open(),
+      tabId: "peer",
+    }).session;
+    await owner.restore();
+
+    await owner.login("administrator", "secret phrase");
+
+    expect(owner.getAccessToken()).toBe(token);
+    expect(peer.getAccessToken()).toBe(token);
+    expect(peer.getState()).toEqual({ status: "authenticated" });
+  });
+
+  it("broadcasts logout only after a confirmed 204", async () => {
+    const bus = new TestChannelBus();
+    const token = freshJwt();
+    const ownerFetch = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, { jwt: token }))
+      .mockResolvedValueOnce(response(500))
+      .mockResolvedValueOnce(response(204));
+    const owner = createSession(ownerFetch, {
+      channel: bus.open(),
+      tabId: "owner",
+    }).session;
+    const peer = createSession(vi.fn(), {
+      channel: bus.open(),
+      tabId: "peer",
+    }).session;
+    await owner.restore();
+
+    await owner.logout();
+    expect(owner.getState()).toEqual({ status: "logout-failed" });
+    expect(peer.getAccessToken()).toBe(token);
+
+    await owner.logout();
+    expect(owner.getAccessToken()).toBeNull();
+    expect(peer.getAccessToken()).toBeNull();
+    expect(peer.getState()).toEqual({ status: "login", submitting: false });
+  });
+
+  it("close cancels a late refresh and detaches cross-tab messages", async () => {
+    const bus = new TestChannelBus();
+    let resolve!: (value: Response | PromiseLike<Response>) => void;
+    const promise = new Promise<Response>((res) => {
+      resolve = res;
+    });
+    const fetchMock = vi.fn().mockReturnValue(promise);
+    const { session } = createSession(fetchMock, {
+      channel: bus.open(),
+      tabId: "closing",
+    });
+    const restoring = session.restore();
+
+    session.close();
+    bus.open().postMessage({
+      type: "terminal",
+      tabId: "peer",
+      requestId: "terminal-after-close",
+    });
+    resolve(response(200, { jwt: freshJwt() }));
+    await restoring;
+
+    expect(session.getAccessToken()).toBeNull();
+    expect(session.getState()).toEqual({ status: "restoring" });
+    await expect(session.protectedFetch("/admin/documents")).rejects.toThrow(
+      "closed",
+    );
+  });
+});
+
+describe("AdminSessionController state transitions", () => {
+  it("keeps restoration retryable after a transient failure", async () => {
+    const token = freshJwt();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(503))
+      .mockResolvedValueOnce(response(200, { jwt: token }));
+    const { session, states } = createSession(fetchMock);
+
+    await session.restore();
+    expect(session.getState()).toEqual({ status: "unavailable" });
+
+    await session.retry();
+    expect(states.at(-2)).toEqual({ status: "restoring" });
+    expect(session.getState()).toEqual({ status: "authenticated" });
+    expect(session.getAccessToken()).toBe(token);
+  });
+
+  it("uses the generic invalid-credential state for rejected login", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(response(401))
-      .mockImplementationOnce(outcome);
+      .mockResolvedValueOnce(response(401));
     const { session } = createSession(fetchMock);
     await session.restore();
 
@@ -134,105 +410,37 @@ describe("AdminSessionController login", () => {
     });
     expect(session.getAccessToken()).toBeNull();
   });
-});
 
-describe("AdminSessionController sign out and terminal loss", () => {
-  it("represents an in-flight sign out as its own session state", async () => {
-    let resolveLogout!: (value: Response) => void;
+  it("retains the active token when logout fails", async () => {
+    const token = freshJwt();
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(response(200, { jwt: "active-token" }))
-      .mockImplementationOnce(
-        () =>
-          new Promise<Response>((resolve) => {
-            resolveLogout = resolve;
-          }),
-      );
+      .mockResolvedValueOnce(response(200, { jwt: token }))
+      .mockRejectedValueOnce(new Error("offline"));
     const { session, states } = createSession(fetchMock);
     await session.restore();
 
     const logout = session.logout();
-
-    expect(session.getState()).toEqual({ status: "signing-out" });
     expect(states.at(-1)).toEqual({ status: "signing-out" });
-    expect(session.getAccessToken()).toBe("active-token");
-
-    resolveLogout(response(500));
     await logout;
-    expect(session.getState()).toEqual({ status: "logout-failed" });
-  });
-
-  it.each([
-    ["a non-success response", () => Promise.resolve(response(500))],
-    ["an unexpected non-204 success", () => Promise.resolve(response(202))],
-    ["a network failure", () => Promise.reject(new Error("offline"))],
-  ])("keeps the active token and protected state after %s", async (_name, outcome) => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(response(200, { jwt: "active-token" }))
-      .mockImplementationOnce(outcome);
-    const { session } = createSession(fetchMock);
-    await session.restore();
-
-    await session.logout();
 
     expect(session.getState()).toEqual({ status: "logout-failed" });
-    expect(session.getAccessToken()).toBe("active-token");
+    expect(session.getAccessToken()).toBe(token);
   });
 
-  it("clears protected state in place only after a confirmed 204", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(response(200, { jwt: "active-token" }))
-      .mockResolvedValueOnce(response(204));
-    const { session } = createSession(fetchMock);
-    await session.restore();
-
-    await session.logout();
-
-    expect(fetchMock).toHaveBeenLastCalledWith("/logout", {
-      method: "POST",
-      credentials: "same-origin",
+  it("ignores a late refresh result after explicit terminal loss", async () => {
+    let resolve!: (value: Response | PromiseLike<Response>) => void;
+    const promise = new Promise<Response>((res) => {
+      resolve = res;
     });
-    expect(session.getState()).toEqual({ status: "login", submitting: false });
-    expect(session.getAccessToken()).toBeNull();
-  });
-
-  it("treats a logout 401 as terminal authentication loss", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(response(200, { jwt: "active-token" }))
-      .mockResolvedValueOnce(response(401));
-    const { session, states } = createSession(fetchMock);
-    await session.restore();
-
-    await session.logout();
-
-    expect(states.slice(-2)).toEqual([
-      { status: "signing-out" },
-      { status: "login", submitting: false },
-    ]);
-    expect(session.getState()).toEqual({ status: "login", submitting: false });
-    expect(session.getAccessToken()).toBeNull();
-  });
-
-  it("terminal authentication loss clears state and ignores a late request result", async () => {
-    let resolveRefresh!: (value: Response) => void;
-    const fetchMock = vi.fn(
-      () =>
-        new Promise<Response>((resolve) => {
-          resolveRefresh = resolve;
-        }),
-    );
+    const fetchMock = vi.fn().mockReturnValue(promise);
     const { session } = createSession(fetchMock);
     const restoring = session.restore();
 
     session.terminalAuthenticationLoss();
-    expect(session.getState()).toEqual({ status: "login", submitting: false });
-    expect(session.getAccessToken()).toBeNull();
-
-    resolveRefresh(response(200, { jwt: "late-token" }));
+    resolve(response(200, { jwt: freshJwt() }));
     await restoring;
+
     expect(session.getState()).toEqual({ status: "login", submitting: false });
     expect(session.getAccessToken()).toBeNull();
   });

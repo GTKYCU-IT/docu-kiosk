@@ -1,4 +1,4 @@
-import { test, expect, type Page, type Response } from '@playwright/test'
+import { test, expect, type BrowserContext, type Page, type Response } from '@playwright/test'
 
 // The test broker (e2e/broker/main.go) always listens on this fixed loopback
 // port and bootstraps the admin user with these credentials, so the suite
@@ -224,4 +224,402 @@ test('rejects refresh without a cookie', async ({ page }) => {
   const response = await page.request.post(`${BASE_URL}/refresh`)
   expect(response.status()).toBe(401)
   expect(response.headers()['cache-control']).toBe('no-store')
+})
+
+// #55: cross-tab session coordination
+
+// Opens a second same-context tab and waits until it restored the shared
+// session; the restore must come from a peer tab's in-memory access JWT.
+async function openPeerTab(context: BrowserContext): Promise<Page> {
+  const peer = await context.newPage()
+  await peer.goto('/admin/')
+  await expect(peer.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+  return peer
+}
+
+// Counts POSTs to one auth endpoint across every tab of the context, so a
+// test can prove exchanges happened exactly as many times as the contract
+// allows.
+function trackAuthPosts(context: BrowserContext, path: string): () => number {
+  let count = 0
+  context.on('request', request => {
+    if (request.url().endsWith(path) && request.method() === 'POST') count += 1
+  })
+  return () => count
+}
+
+test('a new tab restores from the peer access JWT without refreshing', async ({ page, context }) => {
+  await signIn(page)
+  const refreshCount = trackAuthPosts(context, '/refresh')
+  const tokenBefore = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+
+  const peer = await openPeerTab(context)
+
+  // The peer tab authenticated purely from the first tab's in-memory access
+  // JWT: no refresh exchange happened, so the rotating cookie is untouched.
+  expect(refreshCount()).toBe(0)
+  const tokenAfter = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  expect(tokenAfter).toBe(tokenBefore)
+})
+
+test('concurrent near-expiry restores rotate the cookie exactly once and converge', async ({
+  page,
+  context,
+}) => {
+  // The shared access JWT is aged into the safety window on the real clock,
+  // so the concurrent restore race needs the full fifteen-second life budget.
+  test.setTimeout(60_000)
+
+  // Sign in manually so the exact access JWT the two tabs share is
+  // observable and its real exp can drive the wait into the window.
+  await page.goto('/admin/')
+  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
+  const loginPromise = page.waitForResponse(r => r.url().endsWith('/login') && r.request().method() === 'POST')
+  await page.getByLabel('Username').fill(ADMIN_USERNAME)
+  await page.getByLabel('Password').fill(ADMIN_PASSWORD)
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+  const loginResponse = await loginPromise
+  const accessJwt = (await loginResponse.json()).jwt
+
+  const peer = await openPeerTab(context)
+
+  const refreshCount = trackAuthPosts(context, '/refresh')
+  const tokenBefore = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+
+  // Age the shared JWT inside the five-second expiry safety window in real
+  // time: neither tab may restore from its peer, so both reloads demand
+  // /refresh and the cross-tab lock must serialize the exchange.
+  await waitUntilAccessJwtInsideSafetyWindow(page, accessJwt)
+
+  await Promise.all([page.reload(), peer.reload()])
+  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+  await expect(peer.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).not.toBeVisible()
+  await expect(peer.getByRole('heading', { name: LOGIN_HEADING })).not.toBeVisible()
+
+  // The cross-tab lock serialized the exchange: one refresh produced one
+  // successor credential and both tabs converged on it.
+  expect(refreshCount()).toBe(1)
+  const tokenAfter = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  expect(tokenAfter).not.toBe(tokenBefore)
+})
+
+// The broker's two reusable credentials have recognizable shapes: the access
+// token is an HS256 JWT (three dot-separated base64url segments) and the
+// refresh token is hex(randomblob(32)), sixty-four lowercase hex digits.
+// Anything JS-readable that equals a live credential, embeds one, or matches
+// either shape is a leak, so the storage test needs no blanket emptiness.
+const ACCESS_JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/
+const REFRESH_TOKEN_SHAPE = /^[0-9a-f]{64}$/
+
+// Captures every key, value, and name JavaScript can read from the tab:
+// both web storages, IndexedDB database names, Cache Storage names, and the
+// document.cookie pairs. PWA/preferences entries are expected; credentials
+// are not.
+async function inventoryJsReadableStorage(tab: Page): Promise<Record<string, string[]>> {
+  return tab.evaluate(async () => {
+    const inventory: Record<string, string[]> = {}
+    const push = (surface: string, entry: string) => {
+      (inventory[surface] ??= []).push(entry)
+    }
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i) ?? ''
+      push('localStorage', key)
+      push('localStorage', localStorage.getItem(key) ?? '')
+    }
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i) ?? ''
+      push('sessionStorage', key)
+      push('sessionStorage', sessionStorage.getItem(key) ?? '')
+    }
+    for (const database of await indexedDB.databases()) {
+      push('indexedDB', database.name ?? '')
+    }
+    for (const name of await caches.keys()) {
+      push('cacheStorage', name)
+    }
+    for (const pair of document.cookie.split(';')) {
+      const trimmed = pair.trim()
+      const eq = trimmed.indexOf('=')
+      push('cookies', eq === -1 ? trimmed : trimmed.slice(0, eq))
+      push('cookies', eq === -1 ? '' : trimmed.slice(eq + 1))
+    }
+    return inventory
+  })
+}
+
+test('keeps credentials out of JavaScript-visible and durable storage', async ({ page, context }) => {
+  // Sign in manually so the exact access JWT the login issued is observable.
+  await page.goto('/admin/')
+  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
+  const loginPromise = page.waitForResponse(r => r.url().endsWith('/login') && r.request().method() === 'POST')
+  await page.getByLabel('Username').fill(ADMIN_USERNAME)
+  await page.getByLabel('Password').fill(ADMIN_PASSWORD)
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+  const accessJwt = (await (await loginPromise).json()).jwt
+
+  // The refresh credential lives for the browser profile alone.
+  const refreshToken = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+
+  const peer = await openPeerTab(context)
+
+  // Neither tab may expose either live credential, an embedded copy, or any
+  // token-shaped name or value on any JS-readable surface; the HttpOnly
+  // refresh cookie must never show up in document.cookie.
+  for (const [label, tab] of [['first tab', page], ['peer tab', peer]] as const) {
+    const inventory = await inventoryJsReadableStorage(tab)
+    for (const [surface, entries] of Object.entries(inventory)) {
+      for (const entry of entries) {
+        expect(entry, `${label} ${surface} entry must not contain the access JWT`).not.toContain(accessJwt)
+        expect(entry, `${label} ${surface} entry must not contain the refresh token`).not.toContain(refreshToken)
+        expect(
+          ACCESS_JWT_SHAPE.test(entry) || REFRESH_TOKEN_SHAPE.test(entry),
+          `${label} ${surface} entry must not be token-shaped`,
+        ).toBe(false)
+      }
+    }
+  }
+
+  // The session credential still lives for the browser profile alone.
+  const cookie = (await context.cookies()).find(c => c.name === 'refresh_token')
+  expect(cookie).toBeDefined()
+  expect(cookie!.httpOnly).toBe(true)
+})
+
+// #55: terminal auth loss and sign-out convergence across tabs
+
+const LOGOUT_FAILED_TEXT = 'Sign out failed. Your administrator session is still active.'
+
+// The terminal view of an administrator session: only the sign-in form is
+// shown and no authenticated UI remains.
+async function expectSignInScreen(page: Page): Promise<void> {
+  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
+  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).not.toBeVisible()
+  await expect(page.getByRole('button', { name: 'Sign out' })).not.toBeVisible()
+}
+
+// Waits on the page's real clock until the access JWT has certainly
+// expired: idle tabs schedule no refresh, so the terminal 401 can only be
+// provoked by a restore or protected demand, never by the clock alone.
+async function waitUntilAccessJwtExpired(page: Page, jwt: string): Promise<void> {
+  const delay = accessJwtExpiryMs(jwt) - Date.now() + 1000
+  if (delay > 0) {
+    await page.waitForTimeout(delay)
+  }
+}
+
+test('terminal authentication loss after access-JWT expiry converges every same-profile tab to sign in', async ({
+  page,
+  context,
+}) => {
+  // The access JWT lives only fifteen seconds and is aged on the real
+  // clock, so the demand-driven expiry cycle needs room to finish.
+  test.setTimeout(60_000)
+
+  // Sign in manually so the exact access JWT the two tabs share is
+  // observable and its real exp can drive the expiry wait.
+  await page.goto('/admin/')
+  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
+  const loginPromise = page.waitForResponse(r => r.url().endsWith('/login') && r.request().method() === 'POST')
+  await page.getByLabel('Username').fill(ADMIN_USERNAME)
+  await page.getByLabel('Password').fill(ADMIN_PASSWORD)
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+  const loginResponse = await loginPromise
+  const accessJwt = (await loginResponse.json()).jwt
+
+  const peer = await openPeerTab(context)
+
+  // Revoke the refresh credential server-side, as a login from elsewhere
+  // would. Both tabs still hold valid in-memory access JWTs, so only a
+  // demand-driven refresh refusal can end the session.
+  const token = (await context.cookies()).find(c => c.name === 'refresh_token')
+  expect(token).toBeDefined()
+  const revoke = await page.request.post(`${BASE_URL}/logout`, {
+    headers: { cookie: `refresh_token=${token!.value}` },
+  })
+  expect(revoke.status()).toBe(204)
+
+  const refreshCount = trackAuthPosts(context, '/refresh')
+
+  // Wait out the real access-JWT life with both tabs untouched: idle tabs
+  // schedule no refresh, so the session still looks alive and the refresh
+  // endpoint stays silent until a demand arrives.
+  await waitUntilAccessJwtExpired(page, accessJwt)
+  expect(refreshCount()).toBe(0)
+  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+  await expect(peer.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+
+  // One restoration demand trips the revoked credential: the reload's
+  // /refresh refusal is the single exchange that broadcasts the terminal
+  // state to the still-open peer tab.
+  const refresh401 = page.waitForResponse(r => r.url().endsWith('/refresh') && r.request().method() === 'POST')
+  await page.reload()
+  const response = await refresh401
+  expect(response.status()).toBe(401)
+  expect(response.headers()['cache-control']).toBe('no-store')
+
+  // The broadcast converged both tabs on the sign-in form: the reloaded
+  // tab and the untouched peer, with exactly one refresh behind it.
+  await expectSignInScreen(page)
+  await expectSignInScreen(peer)
+  expect(refreshCount()).toBe(1)
+})
+
+test('signing out in one tab removes the authenticated UI from every same-profile tab', async ({
+  page,
+  context,
+}) => {
+  await signIn(page)
+  const peer = await openPeerTab(context)
+
+  // Count every auth exchange the whole profile performs around the
+  // sign-out: the initiating tab's logout is the only one allowed.
+  const refreshCount = trackAuthPosts(context, '/refresh')
+  const loginCount = trackAuthPosts(context, '/login')
+  const logoutCount = trackAuthPosts(context, '/logout')
+
+  const logoutPromise = page.waitForResponse(r => r.url().endsWith('/logout') && r.request().method() === 'POST')
+  await page.getByRole('button', { name: 'Sign out' }).click()
+  const response = await logoutPromise
+  expect(response.status()).toBe(204)
+
+  // Both tabs drop the authenticated card; the peer tab converges without
+  // any user action.
+  await expectSignInScreen(page)
+  await expectSignInScreen(peer)
+
+  // The peer moved purely on the confirmed sign-out broadcast: it performed
+  // no auth request of its own, and the profile's only exchange was the
+  // initiating tab's logout.
+  expect(refreshCount()).toBe(0)
+  expect(loginCount()).toBe(0)
+  expect(logoutCount()).toBe(1)
+})
+
+test('failed sign out keeps every same-profile tab authenticated and explains the failure', async ({
+  page,
+  context,
+}) => {
+  await signIn(page)
+  const peer = await openPeerTab(context)
+  const refreshCount = trackAuthPosts(context, '/refresh')
+  const loginCount = trackAuthPosts(context, '/login')
+  const logoutCount = trackAuthPosts(context, '/logout')
+
+  // A server-side failure must not tear the session down anywhere: the
+  // credential stays valid, every tab stays authenticated, and only the
+  // initiating tab explains the failure.
+  await page.route('**/logout', route =>
+    route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"logout failed"}' }),
+  )
+  await page.getByRole('button', { name: 'Sign out' }).click()
+
+  await expect(page.getByText(LOGOUT_FAILED_TEXT, { exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+  await expect(peer.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+  await expect(peer.getByRole('heading', { name: LOGIN_HEADING })).not.toBeVisible()
+
+  // The failure was isolated to the initiating tab: no auth request from
+  // the peer, no revocation, and the browser kept its credential.
+  expect(refreshCount()).toBe(0)
+  expect(loginCount()).toBe(0)
+  expect(logoutCount()).toBe(1)
+  expect((await context.cookies()).some(c => c.name === 'refresh_token')).toBe(true)
+
+  // The session is still fully usable: retrying sign-out succeeds and the
+  // confirmed broadcast now converges the peer tab too.
+  await page.unroute('**/logout')
+  const logoutPromise = page.waitForResponse(r => r.url().endsWith('/logout') && r.request().method() === 'POST')
+  await page.getByRole('button', { name: 'Sign out' }).click()
+  const response = await logoutPromise
+  expect(response.status()).toBe(204)
+
+  await expectSignInScreen(page)
+  await expectSignInScreen(peer)
+  expect(logoutCount()).toBe(2)
+})
+
+// #55: near-expiry and reload restoration alongside a living peer
+
+// Decodes the exp claim of the access JWT the broker issues (standard
+// RegisteredClaims, fifteen-second life) so a test can wait on the real
+// lifetime instead of a magic constant.
+function accessJwtExpiryMs(jwt: string): number {
+  const payload = jwt.split('.')[1]!
+  const base64 = payload.replace(/-/g, '+').replace(/_/g, '/')
+  return JSON.parse(Buffer.from(base64, 'base64').toString('utf8')).exp * 1000
+}
+
+// Waits on the page's real clock until the access JWT is inside the
+// five-second expiry safety window but not yet expired: a peer must refuse
+// to share it, so a restore demand deterministically falls through to
+// /refresh without waiting out the full fifteen-second life.
+async function waitUntilAccessJwtInsideSafetyWindow(page: Page, jwt: string): Promise<void> {
+  // Target three seconds of remaining life: comfortably inside the window
+  // and comfortably short of real expiry for timing skew.
+  const remaining = accessJwtExpiryMs(jwt) - Date.now()
+  const delay = Math.max(0, remaining - 3000)
+  if (delay > 0) {
+    await page.waitForTimeout(delay)
+  }
+}
+
+test('restoring a third tab while a living peer holds a near-expiry access JWT issues one refresh that every tab converges on', async ({
+  page,
+  context,
+}) => {
+  // Sign in manually so the exact access JWT the tab holds is observable.
+  await page.goto('/admin/')
+  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
+  const loginPromise = page.waitForResponse(r => r.url().endsWith('/login') && r.request().method() === 'POST')
+  await page.getByLabel('Username').fill(ADMIN_USERNAME)
+  await page.getByLabel('Password').fill(ADMIN_PASSWORD)
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+  const loginResponse = await loginPromise
+  const accessJwt = (await loginResponse.json()).jwt
+
+  const peer = await openPeerTab(context)
+
+  // Age the shared JWT inside the safety window in real time. The peer is
+  // still alive but must refuse to share its JWT, so the third tab's demand
+  // deterministically rotates the credential exactly once.
+  await waitUntilAccessJwtInsideSafetyWindow(page, accessJwt)
+
+  const refreshCount = trackAuthPosts(context, '/refresh')
+  const tokenBefore = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  await openPeerTab(context)
+
+  // The demand produced one successor and it reached every tab: the cookie
+  // rotated once and no tab fell back to the sign-in form.
+  expect(refreshCount()).toBe(1)
+  const tokenAfter = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  expect(tokenAfter).not.toBe(tokenBefore)
+  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+  await expect(peer.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+})
+
+test('a reload in a two-tab session restores from the live peer access JWT without refreshing', async ({
+  page,
+  context,
+}) => {
+  await signIn(page)
+  const peer = await openPeerTab(context)
+
+  // The reloading tab must ask its live peer for a fresh in-memory access
+  // JWT before /refresh: the peer holds one, so the reload issues no refresh
+  // and leaves the rotating cookie untouched.
+  const refreshCount = trackAuthPosts(context, '/refresh')
+  const tokenBefore = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  await page.reload()
+
+  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).not.toBeVisible()
+  await expect(peer.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
+  expect(refreshCount()).toBe(0)
+  const tokenAfter = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  expect(tokenAfter).toBe(tokenBefore)
 })
