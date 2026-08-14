@@ -63,32 +63,26 @@ async function setCookieOf(response: Response): Promise<string | undefined> {
   return headers.find(h => h.name.toLowerCase() === 'set-cookie')?.value
 }
 
-// Fills the credential form and submits it; the page ends on the active
-// session screen.
-async function submitSignInForm(page: Page): Promise<void> {
-  await page.getByLabel('Username').fill(ADMIN_USERNAME)
-  await page.getByLabel('Password').fill(ADMIN_PASSWORD)
-  await page.getByRole('button', { name: 'Sign in' }).click()
-  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
-}
-
-async function signIn(page: Page): Promise<void> {
-  await page.goto('/admin/')
-  await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
-  await submitSignInForm(page)
-}
-
-// Signs in and returns the access JWT the /login response issued, for tests
-// that must observe the exact credential the broker handed to the tab. The
-// response waiter is registered before the form is submitted so the /login
-// response cannot slip past it.
+// The only helper that owns the sign-in preamble: navigation, login heading
+// wait, form submission, and the authenticated wait. The /login response
+// waiter is registered before the submit click so the response cannot slip
+// past it, and the access JWT it issued is returned for tests that must
+// observe the exact credential the broker handed to the tab.
 async function signInAndReadAccessJwt(page: Page): Promise<string> {
   await page.goto('/admin/')
   await expect(page.getByRole('heading', { name: LOGIN_HEADING })).toBeVisible()
   const loginPromise = page.waitForResponse(r => r.url().endsWith('/login') && r.request().method() === 'POST')
-  await submitSignInForm(page)
+  await page.getByLabel('Username').fill(ADMIN_USERNAME)
+  await page.getByLabel('Password').fill(ADMIN_PASSWORD)
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
   const loginResponse = await loginPromise
   return (await loginResponse.json()).jwt
+}
+
+// Signs in through the shared preamble and discards the access JWT.
+async function signIn(page: Page): Promise<void> {
+  await signInAndReadAccessJwt(page)
 }
 
 test('serves the admin SPA at /admin and /admin/', async ({ page }) => {

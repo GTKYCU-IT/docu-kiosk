@@ -27,6 +27,27 @@ class TestChannelBus {
   }
 }
 
+function recordingChannel(
+  bus: TestChannelBus,
+): { channel: AdminSessionChannel; posted: AdminSessionMessage[] } {
+  const channel = bus.open();
+  const posted: AdminSessionMessage[] = [];
+  return {
+    channel: {
+      postMessage: (message) => {
+        posted.push(message);
+        channel.postMessage(message);
+      },
+      addEventListener: (type, listener) =>
+        channel.addEventListener(type, listener),
+      removeEventListener: (type, listener) =>
+        channel.removeEventListener(type, listener),
+      close: () => channel.close(),
+    },
+    posted,
+  };
+}
+
 class TestChannel implements AdminSessionChannel {
   private readonly listeners = new Set<(event: MessageEvent<unknown>) => void>();
   private closed = false;
@@ -201,22 +222,9 @@ describe("AdminSessionController protected requests", () => {
       .mockResolvedValueOnce(response(401))
       .mockResolvedValueOnce(response(200, { jwt: successorToken }))
       .mockResolvedValueOnce(response(200, { ok: true }));
-    const ownerChannel = bus.open();
-    // Record the owner's outbound broadcasts so the refresh successor's
-    // browser-session epoch is observable.
-    const posted: AdminSessionMessage[] = [];
+    const { channel, posted } = recordingChannel(bus);
     const { session } = createSession(fetchMock, {
-      channel: {
-        postMessage: (message) => {
-          posted.push(message);
-          ownerChannel.postMessage(message);
-        },
-        addEventListener: (type, listener) =>
-          ownerChannel.addEventListener(type, listener),
-        removeEventListener: (type, listener) =>
-          ownerChannel.removeEventListener(type, listener),
-        close: () => ownerChannel.close(),
-      },
+      channel,
       tabId: "owner",
     });
     await session.restore();
@@ -362,26 +370,14 @@ describe("AdminSessionController cross-tab lifecycle", () => {
     const logoutPromise = new Promise<Response>((res) => {
       resolveLogout = res;
     });
-    const ownerChannel = bus.open();
-    // Record the owner's outbound messages so "serves no token" is observable.
-    const posted: AdminSessionMessage[] = [];
+    const { channel, posted } = recordingChannel(bus);
     const owner = createSession(
       vi
         .fn()
         .mockResolvedValueOnce(response(200, { jwt: token }))
         .mockReturnValueOnce(logoutPromise),
       {
-        channel: {
-          postMessage: (message) => {
-            posted.push(message);
-            ownerChannel.postMessage(message);
-          },
-          addEventListener: (type, listener) =>
-            ownerChannel.addEventListener(type, listener),
-          removeEventListener: (type, listener) =>
-            ownerChannel.removeEventListener(type, listener),
-          close: () => ownerChannel.close(),
-        },
+        channel,
         tabId: "owner",
       },
     ).session;
@@ -462,7 +458,6 @@ describe("AdminSessionController cross-tab lifecycle", () => {
     bus.open().postMessage({
       type: "terminal",
       tabId: "peer",
-      requestId: "terminal-after-close",
       epoch: null,
     });
     resolve(response(200, { jwt: testJwt(NOW + 60_000) }));
@@ -556,20 +551,9 @@ describe("AdminSessionController browser-session epoch", () => {
       .mockResolvedValueOnce(response(200, { jwt: firstToken }))
       .mockResolvedValueOnce(response(204))
       .mockResolvedValueOnce(response(200, { jwt: secondToken }));
-    const ownerChannel = bus.open();
-    const posted: AdminSessionMessage[] = [];
+    const { channel, posted } = recordingChannel(bus);
     const owner = createSession(ownerFetch, {
-      channel: {
-        postMessage: (message) => {
-          posted.push(message);
-          ownerChannel.postMessage(message);
-        },
-        addEventListener: (type, listener) =>
-          ownerChannel.addEventListener(type, listener),
-        removeEventListener: (type, listener) =>
-          ownerChannel.removeEventListener(type, listener),
-        close: () => ownerChannel.close(),
-      },
+      channel,
       tabId: "owner",
     }).session;
     const peer = createSession(vi.fn(), {
@@ -595,13 +579,11 @@ describe("AdminSessionController browser-session epoch", () => {
     bus.open().postMessage({
       type: "logout",
       tabId: "stale-tab",
-      requestId: "stale-logout",
       epoch: firstEpoch,
     });
     bus.open().postMessage({
       type: "terminal",
       tabId: "stale-tab",
-      requestId: "stale-terminal",
       epoch: firstEpoch,
     });
 
@@ -615,20 +597,9 @@ describe("AdminSessionController browser-session epoch", () => {
     "%s during restoration followed by a late targeted token leaves login state",
     async (messageType) => {
       const bus = new TestChannelBus();
-      const ownerChannel = bus.open();
-      const posted: AdminSessionMessage[] = [];
+      const { channel, posted } = recordingChannel(bus);
       const owner = createSession(vi.fn(), {
-        channel: {
-          postMessage: (message) => {
-            posted.push(message);
-            ownerChannel.postMessage(message);
-          },
-          addEventListener: (type, listener) =>
-            ownerChannel.addEventListener(type, listener),
-          removeEventListener: (type, listener) =>
-            ownerChannel.removeEventListener(type, listener),
-          close: () => ownerChannel.close(),
-        },
+        channel,
         tabId: "owner",
         peerWaitMs: 10_000,
       }).session;
@@ -643,7 +614,6 @@ describe("AdminSessionController browser-session epoch", () => {
       bus.open().postMessage({
         type: messageType as "terminal" | "logout",
         tabId: "peer",
-        requestId: `${messageType}-during-restore`,
         epoch: "stale-epoch",
       });
       expect(owner.getState()).toEqual({ status: "login", submitting: false });
@@ -671,22 +641,9 @@ describe("AdminSessionController browser-session epoch", () => {
     let now = NOW;
     const token = testJwt(NOW + 60_000);
     const peerFetch = vi.fn().mockResolvedValue(response(200, { jwt: token }));
-    const peerChannel = bus.open();
-    // Record the peer's outbound messages so the epoch-only response is
-    // observable at the wire level.
-    const peerPosted: AdminSessionMessage[] = [];
+    const { channel, posted: peerPosted } = recordingChannel(bus);
     const peer = createSession(peerFetch, {
-      channel: {
-        postMessage: (message) => {
-          peerPosted.push(message);
-          peerChannel.postMessage(message);
-        },
-        addEventListener: (type, listener) =>
-          peerChannel.addEventListener(type, listener),
-        removeEventListener: (type, listener) =>
-          peerChannel.removeEventListener(type, listener),
-        close: () => peerChannel.close(),
-      },
+      channel,
       tabId: "peer",
       now: () => now,
     }).session;
@@ -706,23 +663,13 @@ describe("AdminSessionController browser-session epoch", () => {
 
     // A reloaded tab starts with no epoch and no JWT of its own; its restore
     // must get only the session epoch, never the stale credential.
-    const reloaderChannel = bus.open();
-    const reloaderPosted: AdminSessionMessage[] = [];
+    const { channel: reloaderChannel, posted: reloaderPosted } =
+      recordingChannel(bus);
     const reloaderFetch = vi.fn().mockResolvedValue(response(401));
     const { session: reloader, states: reloaderStates } = createSession(
       reloaderFetch,
       {
-        channel: {
-          postMessage: (message) => {
-            reloaderPosted.push(message);
-            reloaderChannel.postMessage(message);
-          },
-          addEventListener: (type, listener) =>
-            reloaderChannel.addEventListener(type, listener),
-          removeEventListener: (type, listener) =>
-            reloaderChannel.removeEventListener(type, listener),
-          close: () => reloaderChannel.close(),
-        },
+        channel: reloaderChannel,
         tabId: "reloader",
         now: () => now,
       },
@@ -767,5 +714,287 @@ describe("AdminSessionController browser-session epoch", () => {
     expect(peer.getState()).toEqual({ status: "login", submitting: false });
     expect(peer.getAccessToken()).toBeNull();
     expect(peerFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["terminal", "logout"])(
+    "%s leaves a late broadcast token from the ended epoch unable to resurrect login",
+    async (messageType) => {
+      const bus = new TestChannelBus();
+      const token = testJwt(NOW + 60_000);
+      const ownerFetch = vi
+        .fn()
+        .mockResolvedValueOnce(response(200, { jwt: token }));
+      const { channel, posted } = recordingChannel(bus);
+      const owner = createSession(ownerFetch, {
+        channel,
+        tabId: "owner",
+      }).session;
+      await owner.restore();
+
+      const sessionEpoch = posted.find((m) => m.type === "token")?.epoch ?? null;
+      expect(sessionEpoch).not.toBeNull();
+
+      // A peer's terminal/logout ends the shared epoch in this tab.
+      bus.open().postMessage({
+        type: messageType as "terminal" | "logout",
+        tabId: "peer",
+        epoch: sessionEpoch,
+      });
+      expect(owner.getState()).toEqual({ status: "login", submitting: false });
+      expect(owner.getAccessToken()).toBeNull();
+
+      // A fresh token broadcast from the ended epoch must not resurrect the
+      // session even though this tab currently holds no epoch.
+      const lateToken = testJwt(NOW + 120_000);
+      bus.open().postMessage({
+        type: "token",
+        tabId: "peer",
+        requestId: "late-broadcast",
+        targetTabId: null,
+        jwt: lateToken,
+        epoch: sessionEpoch,
+      });
+      expect(owner.getState()).toEqual({ status: "login", submitting: false });
+      expect(owner.getAccessToken()).toBeNull();
+
+      // A token from a new epoch is still accepted: the ended-epoch guard
+      // must not block legitimate restoration.
+      const successorToken = testJwt(NOW + 240_000);
+      bus.open().postMessage({
+        type: "token",
+        tabId: "peer",
+        requestId: "fresh-broadcast",
+        targetTabId: null,
+        jwt: successorToken,
+        epoch: "fresh-epoch",
+      });
+      expect(owner.getState()).toEqual({ status: "authenticated" });
+      expect(owner.getAccessToken()).toBe(successorToken);
+    },
+  );
+
+  it("does not regress to an older-epoch token after adopting a newer epoch", async () => {
+    const bus = new TestChannelBus();
+    const firstToken = testJwt(NOW + 60_000);
+    const secondToken = testJwt(NOW + 120_000);
+    const ownerFetch = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, { jwt: firstToken }))
+      .mockResolvedValueOnce(response(204))
+      .mockResolvedValueOnce(response(200, { jwt: secondToken }));
+    const { channel, posted } = recordingChannel(bus);
+    const owner = createSession(ownerFetch, {
+      channel,
+      tabId: "owner",
+    }).session;
+    const peer = createSession(vi.fn(), {
+      channel: bus.open(),
+      tabId: "peer",
+    }).session;
+
+    await owner.restore();
+    await owner.logout();
+    await owner.login("administrator", "secret phrase");
+
+    const firstEpoch = posted.find((m) => m.type === "token")?.epoch ?? null;
+    const secondEpoch =
+      posted.filter((m) => m.type === "token").at(-1)?.epoch ?? null;
+    expect(secondEpoch).not.toBe(firstEpoch);
+    expect(peer.getAccessToken()).toBe(secondToken);
+
+    // A late broadcast from the ended epoch and one from an unrelated epoch
+    // must not replace the newer session's token in either tab.
+    const lateToken = testJwt(NOW + 180_000);
+    bus.open().postMessage({
+      type: "token",
+      tabId: "stale-tab",
+      requestId: "stale-broadcast",
+      targetTabId: null,
+      jwt: lateToken,
+      epoch: firstEpoch,
+    });
+    bus.open().postMessage({
+      type: "token",
+      tabId: "other-tab",
+      requestId: "unrelated-broadcast",
+      targetTabId: null,
+      jwt: testJwt(NOW + 240_000),
+      epoch: "unrelated-epoch",
+    });
+
+    expect(owner.getState()).toEqual({ status: "authenticated" });
+    expect(owner.getAccessToken()).toBe(secondToken);
+    expect(peer.getState()).toEqual({ status: "authenticated" });
+    expect(peer.getAccessToken()).toBe(secondToken);
+  });
+});
+
+describe("AdminSessionController protocol requestId scoping", () => {
+  it("ignores token-request/token/epoch messages missing or carrying a non-string requestId, but still honors requestId-free terminal/logout", async () => {
+    const bus = new TestChannelBus();
+    const token = testJwt(NOW + 60_000);
+    const ownerFetch = vi.fn().mockResolvedValue(response(200, { jwt: token }));
+    const { channel, posted } = recordingChannel(bus);
+    const owner = createSession(ownerFetch, {
+      channel,
+      tabId: "owner",
+    }).session;
+    await owner.restore();
+
+    const sessionEpoch = posted.find((m) => m.type === "token")?.epoch ?? null;
+    expect(sessionEpoch).not.toBeNull();
+
+    bus.open().postMessage({
+      type: "token-request",
+      tabId: "intruder",
+    } as unknown as AdminSessionMessage);
+    bus.open().postMessage({
+      type: "token-request",
+      tabId: "intruder",
+      requestId: 42,
+    } as unknown as AdminSessionMessage);
+    expect(
+      posted.some(
+        (message) =>
+          (message.type === "token" || message.type === "epoch") &&
+          message.targetTabId === "intruder",
+      ),
+    ).toBe(false);
+
+    bus.open().postMessage({
+      type: "token-request",
+      tabId: "intruder",
+      requestId: "intruder-request",
+    });
+    expect(
+      posted.some(
+        (message): message is Extract<AdminSessionMessage, { type: "token" }> =>
+          message.type === "token" && message.requestId === "intruder-request",
+      ),
+    ).toBe(true);
+
+    const successorToken = testJwt(NOW + 120_000);
+    bus.open().postMessage({
+      type: "token",
+      tabId: "peer",
+      targetTabId: null,
+      jwt: successorToken,
+      epoch: sessionEpoch,
+    } as unknown as AdminSessionMessage);
+    expect(owner.getAccessToken()).toBe(token);
+    bus.open().postMessage({
+      type: "token",
+      tabId: "peer",
+      requestId: 42,
+      targetTabId: null,
+      jwt: testJwt(NOW + 180_000),
+      epoch: sessionEpoch,
+    } as unknown as AdminSessionMessage);
+    expect(owner.getAccessToken()).toBe(token);
+
+    bus.open().postMessage({
+      type: "token",
+      tabId: "peer",
+      requestId: "fresh-broadcast",
+      targetTabId: null,
+      jwt: successorToken,
+      epoch: sessionEpoch,
+    });
+    expect(owner.getAccessToken()).toBe(successorToken);
+    expect(owner.getState()).toEqual({ status: "authenticated" });
+
+    // Terminal is fire-and-forget: no requestId is required.
+    bus.open().postMessage({
+      type: "terminal",
+      tabId: "peer",
+      epoch: sessionEpoch,
+    });
+    expect(owner.getState()).toEqual({ status: "login", submitting: false });
+    expect(owner.getAccessToken()).toBeNull();
+
+    // The reloader restores on its own bus: with no active fresh-token peer
+    // to auto-answer, injected epoch responses resolve both peer waiters.
+    const reloaderBus = new TestChannelBus();
+    const reloaderToken = testJwt(NOW + 240_000);
+    const reloaderFetch = vi
+      .fn()
+      .mockResolvedValue(response(200, { jwt: reloaderToken }));
+    const { channel: reloaderChannel, posted: reloaderPosted } =
+      recordingChannel(reloaderBus);
+    const reloader = createSession(reloaderFetch, {
+      channel: reloaderChannel,
+      tabId: "reloader",
+      peerWaitMs: 10_000,
+    }).session;
+
+    const restoring = reloader.restore();
+    const requestId =
+      reloaderPosted.find((m) => m.type === "token-request")?.requestId ??
+      "missing";
+    expect(reloader.getState()).toEqual({ status: "restoring" });
+
+    reloaderBus.open().postMessage({
+      type: "epoch",
+      tabId: "peer",
+      targetTabId: "reloader",
+      epoch: "bootstrap-epoch",
+    } as unknown as AdminSessionMessage);
+    reloaderBus.open().postMessage({
+      type: "epoch",
+      tabId: "peer",
+      requestId: 42,
+      targetTabId: "reloader",
+      epoch: "bootstrap-epoch",
+    } as unknown as AdminSessionMessage);
+    expect(reloader.getState()).toEqual({ status: "restoring" });
+    expect(reloaderFetch).not.toHaveBeenCalled();
+
+    reloaderBus.open().postMessage({
+      type: "epoch",
+      tabId: "peer",
+      requestId,
+      targetTabId: "reloader",
+      epoch: "bootstrap-epoch",
+    });
+
+    // The coordinated refresh performs a second peer recheck inside the
+    // lock; wait until it is posted, then answer it too.
+    await vi.waitFor(() => {
+      expect(
+        reloaderPosted.some(
+          (m) => m.type === "token-request" && m.requestId !== requestId,
+        ),
+      ).toBe(true);
+    });
+    const secondRequestId =
+      reloaderPosted.find(
+        (
+          m,
+        ): m is Extract<AdminSessionMessage, { type: "token-request" }> =>
+          m.type === "token-request" && m.requestId !== requestId,
+      )?.requestId ?? "missing";
+    reloaderBus.open().postMessage({
+      type: "epoch",
+      tabId: "peer",
+      requestId: secondRequestId,
+      targetTabId: "reloader",
+      epoch: "bootstrap-epoch",
+    });
+    await restoring;
+
+    expect(reloaderFetch).toHaveBeenCalledTimes(1);
+    expect(reloader.getState()).toEqual({ status: "authenticated" });
+    expect(reloader.getAccessToken()).toBe(reloaderToken);
+
+    // Logout is fire-and-forget too: no requestId is required, and a stray
+    // non-string one must not silence a matching-epoch message.
+    reloaderBus.open().postMessage({
+      type: "logout",
+      tabId: "other-peer",
+      epoch: "bootstrap-epoch",
+      requestId: 7,
+    } as unknown as AdminSessionMessage);
+    expect(reloader.getState()).toEqual({ status: "login", submitting: false });
+    expect(reloader.getAccessToken()).toBeNull();
   });
 });

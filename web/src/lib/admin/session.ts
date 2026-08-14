@@ -18,8 +18,8 @@ export type AdminSessionMessage =
       epoch: string | null;
     }
   | { type: "epoch"; tabId: string; requestId: string; targetTabId: string; epoch: string }
-  | { type: "terminal"; tabId: string; requestId: string; epoch: string | null }
-  | { type: "logout"; tabId: string; requestId: string; epoch: string | null };
+  | { type: "terminal"; tabId: string; epoch: string | null }
+  | { type: "logout"; tabId: string; epoch: string | null };
 
 export interface AdminSessionChannel {
   postMessage(message: AdminSessionMessage): void;
@@ -75,6 +75,7 @@ export class AdminSessionController {
   private state: AdminSessionState = { status: "restoring" };
   private jwt: string | null = null;
   private epoch: string | null = null;
+  private readonly endedEpochs = new Set<string>();
   private operation = 0;
   private closed = false;
 
@@ -110,8 +111,19 @@ export class AdminSessionController {
     }
 
     if (message.type === "token") {
-      // Peer token broadcasts must not invalidate a pending logout.
       if (this.state.status === "signing-out") return;
+
+      // A token from an ended browser-session epoch must not resurrect the
+      // terminated session, and a live epoch admits only its own tokens so a
+      // racing successor from another epoch cannot regress this session.
+      if (message.epoch !== null && this.endedEpochs.has(message.epoch)) return;
+      if (
+        message.epoch !== null &&
+        this.epoch !== null &&
+        message.epoch !== this.epoch
+      ) {
+        return;
+      }
 
       const waiter = this.peerWaiters.get(message.requestId);
       if (message.targetTabId !== null) {
@@ -134,13 +146,11 @@ export class AdminSessionController {
     }
 
     if (message.type === "epoch") {
-      // An epoch-only response is honored only while the matching request
-      // waiter remains live and is addressed to this tab, like a targeted
-      // token; a late response must not resurrect a terminated session.
+      // An epoch-only response is honored only while the matching waiter
+      // remains live and targets this tab; a late response must not
+      // resurrect a terminated session.
       const waiter = this.peerWaiters.get(message.requestId);
       if (waiter === undefined || message.targetTabId !== this.tabId) return;
-      // Adopt the browser-session epoch only when this tab has none yet;
-      // an existing local epoch is authoritative.
       if (this.epoch === null) this.epoch = message.epoch;
       clearTimeout(waiter.timer);
       this.peerWaiters.delete(message.requestId);
@@ -151,9 +161,10 @@ export class AdminSessionController {
 
     // Terminal/logout messages terminate only tabs still in the sender's
     // browser-session epoch, so stale messages cannot kill a later login.
-    // A tab with no epoch yet (restoring) has no session to protect and
-    // honors the message, stopping the in-flight restoration.
+    // The ended epoch is recorded so a late token from it cannot resurrect
+    // the session.
     if (this.epoch !== null && message.epoch !== this.epoch) return;
+    if (message.epoch !== null) this.endedEpochs.add(message.epoch);
     this.localTerminalTransition();
   };
 
@@ -252,12 +263,14 @@ export class AdminSessionController {
 
       if (response.status === 204) {
         const epoch = this.epoch;
+        // The confirmed logout ends this browser-session epoch; a late
+        // token from it must not resurrect the session.
+        if (epoch !== null) this.endedEpochs.add(epoch);
         this.clearProtectedState();
         this.update({ status: "login", submitting: false });
         this.postMessage({
           type: "logout",
           tabId: this.tabId,
-          requestId: this.createId(),
           epoch,
         });
         return;
@@ -315,13 +328,13 @@ export class AdminSessionController {
     if (this.closed) return;
 
     // Local-origin loss: this tab's own fetch failed, so peers must hear about it.
-    // Capture the epoch first: localTerminalTransition clears it.
+    // Capture and end the epoch first: localTerminalTransition clears it.
     const epoch = this.epoch;
+    if (epoch !== null) this.endedEpochs.add(epoch);
     this.localTerminalTransition();
     this.postMessage({
       type: "terminal",
       tabId: this.tabId,
-      requestId: this.createId(),
       epoch,
     });
   }
@@ -472,7 +485,9 @@ export class AdminSessionController {
   private withBearer(request: Request, jwt: string): Request {
     const headers = new Headers(request.headers);
     headers.set("Authorization", `Bearer ${jwt}`);
-    return new Request(request.clone(), { headers });
+    // A single Request copy leaves the caller's request body unread, so the
+    // protected fetch can still retry with the same request.
+    return new Request(request, { headers });
   }
 
   private async readJwt(response: Response): Promise<string | null> {
@@ -506,11 +521,17 @@ export class AdminSessionController {
   private parseMessage(value: unknown): AdminSessionMessage | null {
     if (typeof value !== "object" || value === null) return null;
     const message = value as Record<string, unknown>;
-    if (typeof message.tabId !== "string" || typeof message.requestId !== "string") {
-      return null;
-    }
+    if (typeof message.tabId !== "string") return null;
+    // Only request/response protocol variants are correlated by requestId;
+    // terminal/logout broadcasts are fire-and-forget.
+    const requestIdRequired =
+      message.type === "token-request" ||
+      message.type === "token" ||
+      message.type === "epoch";
+    if (requestIdRequired && typeof message.requestId !== "string") return null;
 
     if (message.type === "token-request") {
+      if (typeof message.requestId !== "string") return null;
       return {
         type: "token-request",
         tabId: message.tabId,
@@ -523,7 +544,6 @@ export class AdminSessionController {
         return {
           type: message.type,
           tabId: message.tabId,
-          requestId: message.requestId,
           epoch,
         };
       }
@@ -531,6 +551,7 @@ export class AdminSessionController {
     }
     if (
       message.type === "epoch" &&
+      typeof message.requestId === "string" &&
       typeof message.targetTabId === "string" &&
       typeof message.epoch === "string"
     ) {
@@ -544,6 +565,7 @@ export class AdminSessionController {
     }
     if (
       message.type === "token" &&
+      typeof message.requestId === "string" &&
       typeof message.jwt === "string" &&
       (message.targetTabId === null || typeof message.targetTabId === "string")
     ) {
