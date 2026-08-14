@@ -129,11 +129,9 @@ func registerKiosk(t *testing.T, ts *httptest.Server, name string) {
 	}
 }
 
-// connectWS dials the WebSocket endpoint and reads the initial "connected" message.
-// The connecting IP must already be registered via registerKiosk.
-func connectWS(t *testing.T, ts *httptest.Server) (*websocket.Conn, string) {
+func dialUninitializedWS(t *testing.T, ts *httptest.Server, opts *websocket.DialOptions) (*websocket.Conn, string) {
 	t.Helper()
-	conn, _, err := websocket.Dial(context.Background(), wsURL(ts), nil)
+	conn, _, err := websocket.Dial(context.Background(), wsURL(ts), opts)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -156,6 +154,47 @@ func connectWS(t *testing.T, ts *httptest.Server) (*websocket.Conn, string) {
 	}
 
 	return conn, msg.Name
+}
+
+func completeStatusHandshake(t *testing.T, conn *websocket.Conn, status string) {
+	t.Helper()
+	if err := conn.Write(context.Background(), websocket.MessageText,
+		[]byte(fmt.Sprintf(`{"type":"status","status":%q}`, status))); err != nil {
+		t.Fatalf("write status frame: %v", err)
+	}
+}
+
+func waitForPublishedSessions(t *testing.T, s *server, count int) {
+	t.Helper()
+	waitFor(t, func() bool { return len(s.hub.Statuses()) == count })
+}
+
+// connectWS dials the WebSocket endpoint and completes the handshake: reads
+// the initial "connected" message and sends a ready status frame. The
+// connecting IP must already be registered via registerKiosk.
+func connectWS(t *testing.T, ts *httptest.Server) (*websocket.Conn, string) {
+	t.Helper()
+	return connectWSStatus(t, ts, "ready")
+}
+
+// connectWSStatus is connectWS with a caller-chosen handshake status.
+func connectWSStatus(t *testing.T, ts *httptest.Server, status string) (*websocket.Conn, string) {
+	t.Helper()
+	conn, name := dialUninitializedWS(t, ts, nil)
+	completeStatusHandshake(t, conn, status)
+	return conn, name
+}
+
+// connectWSStatusFrom dials from the given client IP (via X-Forwarded-For,
+// which requires the trusted-proxy test server) and completes the handshake
+// with the given status.
+func connectWSStatusFrom(t *testing.T, ts *httptest.Server, ip, status string) (*websocket.Conn, string) {
+	t.Helper()
+	conn, name := dialUninitializedWS(t, ts, &websocket.DialOptions{
+		HTTPHeader: http.Header{"X-Forwarded-For": []string{ip}},
+	})
+	completeStatusHandshake(t, conn, status)
+	return conn, name
 }
 
 // RFC 9457 problem type URNs for registration failures. The browser
@@ -350,7 +389,7 @@ func TestRegisterBadJSON(t *testing.T) {
 // same IP, receives kiosk-already-registered, and recovers by opening a
 // session whose greeting carries the authoritative name and identity.
 func TestRegisterAlreadyRegisteredSameName(t *testing.T) {
-	_, ts := setupTestServer(t)
+	s, ts := setupTestServer(t)
 	registerKiosk(t, ts, "Lobby")
 
 	status, p := registerFromIP(t, ts, "", "Lobby")
@@ -365,6 +404,7 @@ func TestRegisterAlreadyRegisteredSameName(t *testing.T) {
 	if name != "Lobby" {
 		t.Errorf("expected greeting name Lobby, got %s", name)
 	}
+	waitForPublishedSessions(t, s, 1)
 	if kiosks := listKiosks(t, ts); len(kiosks) != 1 || kiosks[0].Name != "Lobby" {
 		t.Errorf("expected exactly one kiosk named Lobby, got %+v", kiosks)
 	}
@@ -375,13 +415,14 @@ func TestRegisterAlreadyRegisteredSameName(t *testing.T) {
 // kiosk-already-registered and the stored identity — id, display name, and
 // greeting — is untouched.
 func TestRegisterSameIPCannotRename(t *testing.T) {
-	_, ts := setupTestServer(t)
+	s, ts := setupTestServer(t)
 	registerKiosk(t, ts, "A")
 
 	_, name := connectWS(t, ts)
 	if name != "A" {
 		t.Errorf("expected greeting name A, got %s", name)
 	}
+	waitForPublishedSessions(t, s, 1)
 	before := listKiosks(t, ts)
 	if len(before) != 1 || before[0].Name != "A" {
 		t.Fatalf("expected one kiosk named A, got %+v", before)
@@ -600,9 +641,11 @@ func TestListKiosksEmpty(t *testing.T) {
 }
 
 func TestListKiosksShowsConnected(t *testing.T) {
-	_, ts := setupTestServer(t)
+	s, ts := setupTestServer(t)
 	registerKiosk(t, ts, "lobby")
 	connectWS(t, ts)
+
+	waitForPublishedSessions(t, s, 1)
 
 	res, err := http.Get(ts.URL + "/api/kiosks")
 	if err != nil {
@@ -625,6 +668,82 @@ func TestListKiosksShowsConnected(t *testing.T) {
 	}
 	if kiosks[0].ID == uuid.Nil {
 		t.Error("expected non-nil ID")
+	}
+}
+
+func TestListKiosksShowsReadyAndSigningExcludesUninitialized(t *testing.T) {
+	s, ts := setupTrustedProxyServer(t)
+	registerFromIP(t, ts, "10.0.0.2", "ready-kiosk")
+	registerFromIP(t, ts, "10.0.0.3", "signing-kiosk")
+	registerFromIP(t, ts, "10.0.0.4", "uninitialized-kiosk")
+
+	connectWSStatusFrom(t, ts, "10.0.0.2", "ready")
+	connectWSStatusFrom(t, ts, "10.0.0.3", "signing")
+	dialUninitializedWS(t, ts, &websocket.DialOptions{
+		HTTPHeader: http.Header{"X-Forwarded-For": []string{"10.0.0.4"}},
+	})
+
+	waitForPublishedSessions(t, s, 2)
+
+	list := listKiosks(t, ts)
+	if len(list) != 2 {
+		t.Fatalf("expected 2 listed kiosks, got %+v", list)
+	}
+	if list[0].Name != "ready-kiosk" || list[1].Name != "signing-kiosk" {
+		t.Fatalf("expected [ready-kiosk signing-kiosk] in name order, got %+v", list)
+	}
+	for _, k := range list {
+		if k.Name == "uninitialized-kiosk" || k.ID == uuid.Nil {
+			t.Errorf("unexpected list entry %+v", k)
+		}
+	}
+
+	statusByKioskID := s.hub.Statuses()
+	if len(statusByKioskID) != 2 ||
+		statusByKioskID[list[0].ID] != hub.StatusReady ||
+		statusByKioskID[list[1].ID] != hub.StatusSigning {
+		t.Fatalf("expected ready and signing statuses for %v and %v, got %v", list[0], list[1], statusByKioskID)
+	}
+}
+
+func TestPushToSigningKioskSucceeds(t *testing.T) {
+	s, ts := setupTestServer(t)
+	registerKiosk(t, ts, "lobby")
+	conn, _ := connectWSStatus(t, ts, "signing")
+
+	waitForPublishedSessions(t, s, 1)
+
+	list := listKiosks(t, ts)
+	if len(list) != 1 {
+		t.Fatalf("expected 1 listed kiosk, got %+v", list)
+	}
+
+	res, err := http.Post(ts.URL+"/api/kiosks/"+list[0].ID.String()+"/sessions", "application/json",
+		strings.NewReader(`{"url":"https://example.docusign.net/sign/abc123"}`))
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", res.StatusCode)
+	}
+
+	_, data, err := conn.Read(context.Background())
+	if err != nil {
+		t.Fatalf("read ws message: %v", err)
+	}
+	var msg struct {
+		Type string `json:"type"`
+		URL  string `json:"url"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if msg.Type != "sign" {
+		t.Errorf("expected type sign, got %q", msg.Type)
+	}
+	if msg.URL != "https://example.docusign.net/sign/abc123" {
+		t.Errorf("unexpected url: %s", msg.URL)
 	}
 }
 
@@ -654,9 +773,7 @@ func TestWSConnectsWhenRegistered(t *testing.T) {
 	registerKiosk(t, ts, "lobby")
 	connectWS(t, ts)
 
-	if len(s.hub.Connected()) != 1 {
-		t.Errorf("expected 1 connected kiosk, got %v", s.hub.Connected())
-	}
+	waitForPublishedSessions(t, s, 1)
 }
 
 func TestWSDisconnectRemovesFromHub(t *testing.T) {
@@ -666,7 +783,7 @@ func TestWSDisconnectRemovesFromHub(t *testing.T) {
 	conn, _ := connectWS(t, ts)
 	conn.CloseNow()
 
-	waitFor(t, func() bool { return len(s.hub.Connected()) == 0 })
+	waitFor(t, func() bool { return len(s.hub.Statuses()) == 0 })
 }
 
 func TestWSReconnect(t *testing.T) {
@@ -675,18 +792,20 @@ func TestWSReconnect(t *testing.T) {
 
 	conn, _ := connectWS(t, ts)
 	conn.CloseNow()
-	waitFor(t, func() bool { return len(s.hub.Connected()) == 0 })
+	waitFor(t, func() bool { return len(s.hub.Statuses()) == 0 })
 
 	connectWS(t, ts)
-	waitFor(t, func() bool { return len(s.hub.Connected()) == 1 })
+	waitFor(t, func() bool { return len(s.hub.Statuses()) == 1 })
 }
 
 // --- Push ---
 
 func TestPushSuccess(t *testing.T) {
-	_, ts := setupTestServer(t)
+	s, ts := setupTestServer(t)
 	registerKiosk(t, ts, "lobby")
 	conn, _ := connectWS(t, ts)
+
+	waitForPublishedSessions(t, s, 1)
 
 	res, err := http.Get(ts.URL + "/api/kiosks")
 	if err != nil {
@@ -794,9 +913,7 @@ func TestRegisterThenConnect(t *testing.T) {
 		t.Errorf("expected name lobby from connected message, got %q", name)
 	}
 
-	if len(s.hub.Connected()) != 1 {
-		t.Errorf("expected 1 kiosk in hub, got %v", s.hub.Connected())
-	}
+	waitForPublishedSessions(t, s, 1)
 }
 
 // stubHub is a kioskHub fake for handler tests.
@@ -813,7 +930,7 @@ func (sh *stubHub) PushSign(ctx context.Context, id uuid.UUID, url string) error
 	return sh.sendErr
 }
 
-func (sh *stubHub) Connected() []uuid.UUID {
+func (sh *stubHub) Statuses() hub.StatusSnapshot {
 	return nil
 }
 

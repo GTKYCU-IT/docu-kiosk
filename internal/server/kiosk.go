@@ -92,7 +92,7 @@ func (s *server) handleListKiosks(w http.ResponseWriter, r *http.Request) {
 		Name string    `json:"name"`
 	}
 
-	ks, err := s.kiosks.ListLive(r.Context(), s.hub.Connected())
+	ks, err := s.kiosks.ListLive(r.Context(), s.hub.Statuses().LiveKioskIDs())
 	if err != nil {
 		s.respondWithError(w, "failed to list kiosks", http.StatusInternalServerError, err)
 		return

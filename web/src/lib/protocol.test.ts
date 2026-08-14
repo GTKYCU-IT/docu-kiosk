@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { parse } from "./protocol";
+import { encodeStatus, parse } from "./protocol";
+
+describe("encodeStatus", () => {
+  it("emits the exact ready frame bytes", () => {
+    expect(encodeStatus("ready")).toBe('{"type":"status","status":"ready"}');
+  });
+
+  it("emits the exact signing frame bytes", () => {
+    expect(encodeStatus("signing")).toBe('{"type":"status","status":"signing"}');
+  });
+});
 
 describe("parse", () => {
   it("decodes a connected message", () => {

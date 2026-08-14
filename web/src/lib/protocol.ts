@@ -9,6 +9,12 @@ export type Message =
   | { type: "connected"; name: string }
   | { type: "sign"; url: string };
 
+export type KioskStatus = "ready" | "signing";
+
+export function encodeStatus(status: KioskStatus): string {
+  return JSON.stringify({ type: "status", status });
+}
+
 /**
  * Decode a raw WebSocket payload into a typed wire message.
  *

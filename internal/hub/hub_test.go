@@ -19,13 +19,27 @@ import (
 	"github.com/google/uuid"
 )
 
+// frame is a queued Read payload.
+type frame struct {
+	typ  websocket.MessageType
+	data []byte
+}
+
+// textFrame builds a text frame for the read queue.
+func textFrame(s string) frame {
+	return frame{typ: websocket.MessageText, data: []byte(s)}
+}
+
 // fakeConn is a scriptable conn used in place of a real WebSocket. Writes are
-// recorded (as copies) under a mutex; Read blocks on readCh and returns an
-// error once it is closed, but also returns ctx.Err() when ctx is done —
-// mirroring real conn semantics.
+// recorded (as copies) under a mutex; Read drains queued frames in order and
+// otherwise blocks on readCh, returning an error once it is closed, but also
+// returns ctx.Err() when ctx is done — mirroring real conn semantics.
 type fakeConn struct {
 	mu             sync.Mutex
 	writes         [][]byte
+	readFrames     []frame
+	readCount      int
+	readSignal     chan struct{} // closed (and replaced) when a frame is queued
 	writeErr       error
 	pingErr        error
 	readCh         chan struct{}
@@ -37,7 +51,19 @@ type fakeConn struct {
 }
 
 func newFakeConn() *fakeConn {
-	return &fakeConn{readCh: make(chan struct{})}
+	return &fakeConn{readCh: make(chan struct{}), readSignal: make(chan struct{})}
+}
+
+// queueFrame appends a frame for the next Read to return, in order. Frames
+// queued before a session starts script its handshake and transitions;
+// frames queued later wake a Read already blocked and are picked up by the
+// session's read loop.
+func (f *fakeConn) queueFrame(fr frame) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.readFrames = append(f.readFrames, frame{typ: fr.typ, data: append([]byte(nil), fr.data...)})
+	close(f.readSignal)
+	f.readSignal = make(chan struct{})
 }
 
 // closeRead releases a blocked Read. Safe to call more than once.
@@ -133,11 +159,25 @@ func (f *fakeConn) Ping(_ context.Context) error {
 }
 
 func (f *fakeConn) Read(ctx context.Context) (websocket.MessageType, []byte, error) {
-	select {
-	case <-f.readCh:
-		return 0, nil, errors.New("connection closed")
-	case <-ctx.Done():
-		return 0, nil, ctx.Err()
+	for {
+		f.mu.Lock()
+		if len(f.readFrames) > 0 {
+			fr := f.readFrames[0]
+			f.readFrames = f.readFrames[1:]
+			f.readCount++
+			f.mu.Unlock()
+			return fr.typ, fr.data, nil
+		}
+		signal := f.readSignal
+		f.mu.Unlock()
+		select {
+		case <-f.readCh:
+			return 0, nil, errors.New("connection closed")
+		case <-signal:
+			// A frame may have been queued; re-check.
+		case <-ctx.Done():
+			return 0, nil, ctx.Err()
+		}
 	}
 }
 
@@ -180,6 +220,16 @@ func (f *fakeConn) lastWrite() []byte {
 		return nil
 	}
 	return f.writes[len(f.writes)-1]
+}
+
+// framesConsumed reports how many frames Read has consumed. A session that
+// consumed its initial status frame is past the handshake read and inside
+// the publication path, so a concurrent operation holding the identity
+// boundary has a queued — not merely scheduled — publication behind it.
+func (f *fakeConn) framesConsumed() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.readCount
 }
 
 // fakeStore is a map-backed KioskStore: unknown IPs yield kiosks.ErrNotFound,
@@ -283,11 +333,19 @@ func assertDone(t *testing.T, what string, done <-chan struct{}) {
 	}
 }
 
-// startSession runs runSession in a goroutine and returns the conn, a done
-// channel closed when the session exits, and a cleanup that releases the
-// session's read and waits for it to finish.
 func startSession(t *testing.T, h *Hub, k kiosks.Kiosk, c *fakeConn) chan struct{} {
 	t.Helper()
+	return startSessionFrames(t, h, k, c, textFrame(`{"type":"status","status":"ready"}`))
+}
+
+// startSessionFrames runs runSession with the given frames queued on the conn
+// in order: the first frame is the handshake status, later frames are
+// post-handshake transition updates.
+func startSessionFrames(t *testing.T, h *Hub, k kiosks.Kiosk, c *fakeConn, frames ...frame) chan struct{} {
+	t.Helper()
+	for _, fr := range frames {
+		c.queueFrame(fr)
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -298,6 +356,12 @@ func startSession(t *testing.T, h *Hub, k kiosks.Kiosk, c *fakeConn) chan struct
 		<-done
 	})
 	return done
+}
+
+// published reports whether id has a live session with a reported status.
+func published(h *Hub, id uuid.UUID) bool {
+	_, ok := h.Statuses()[id]
+	return ok
 }
 
 // assertPushedSign asserts that the conn's last write is exactly the sign
@@ -412,7 +476,7 @@ func TestRunSessionGreetsAndRegisters(t *testing.T) {
 	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, fc)
 
 	waitFor(t, func() bool {
-		return slices.Contains(h.Connected(), id) && len(fc.recordedWrites()) >= 1
+		return published(h, id) && len(fc.recordedWrites()) >= 1
 	})
 
 	want := `{"name":"lobby","type":"connected"}`
@@ -427,10 +491,10 @@ func TestRunSessionDisconnectRemovesSession(t *testing.T) {
 	fc := newFakeConn()
 	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, fc)
 
-	waitFor(t, func() bool { return slices.Contains(h.Connected(), id) })
+	waitFor(t, func() bool { return published(h, id) })
 
 	fc.closeRead()
-	waitFor(t, func() bool { return len(h.Connected()) == 0 })
+	waitFor(t, func() bool { return len(h.Statuses()) == 0 })
 }
 
 func TestRunSessionPingFailureClosesSession(t *testing.T) {
@@ -442,26 +506,22 @@ func TestRunSessionPingFailureClosesSession(t *testing.T) {
 	fc.pingErr = errors.New("ping timeout")
 	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, fc)
 
-	// The session may register and tear down (5ms ping interval) before the
-	// first poll, so assert on the recorded greeting write instead: it is
-	// written after registration and persists after teardown.
+	// Ping failure can remove the session before the first status poll.
 	waitFor(t, func() bool { return len(fc.recordedWrites()) >= 1 })
-	waitFor(t, func() bool { return len(h.Connected()) == 0 })
+	waitFor(t, func() bool { return len(h.Statuses()) == 0 })
 }
 
 func TestRunSessionGreetingWriteFailureTearsDown(t *testing.T) {
 	h, buf := newTestHub(nil)
 	id := uuid.New()
 	fc := newFakeConn()
-	// The greeting write fails before the session ever serves a message.
 	fc.setWriteErr(errors.New("socket closed"))
 	done := startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, fc)
 
-	// The session registers, the greeting write fails, and teardown removes
-	// it. The done channel closes only after CloseNow and the conditional
-	// teardown both completed.
-	waitFor(t, func() bool { return len(h.Connected()) == 0 })
 	assertDone(t, "session teardown", done)
+	if got := h.Statuses(); len(got) != 0 {
+		t.Fatalf("greeting write failure published session: %v", got)
+	}
 
 	logged := buf.String()
 	if !strings.Contains(logged, "write greeting") {
@@ -478,16 +538,15 @@ func TestRunSessionReconnectReplacesSession(t *testing.T) {
 
 	connA := newFakeConn()
 	doneA := startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connA)
-	waitFor(t, func() bool { return slices.Contains(h.Connected(), id) })
+	waitFor(t, func() bool { return published(h, id) })
 
 	connB := newFakeConn()
-	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB)
+	startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
+		textFrame(`{"type":"status","status":"signing"}`))
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusSigning })
 
-	// B's greeting proves B registered and replaced A in the sessions map.
-	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
-
-	if got := h.Connected(); len(got) != 1 || got[0] != id {
-		t.Fatalf("expected exactly session %v, got %v", id, got)
+	if got := h.Statuses(); len(got) != 1 || got[id] != StatusSigning {
+		t.Fatalf("expected exactly session %v signing, got %v", id, got)
 	}
 
 	// Stale-teardown ordering: A's session ends only after B has replaced it.
@@ -497,8 +556,8 @@ func TestRunSessionReconnectReplacesSession(t *testing.T) {
 	connA.closeRead()
 	assertDone(t, "stale session teardown", doneA)
 
-	if got := h.Connected(); len(got) != 1 || got[0] != id {
-		t.Fatalf("stale teardown removed live session: expected exactly %v, got %v", id, got)
+	if got := h.Statuses(); len(got) != 1 || got[id] != StatusSigning {
+		t.Fatalf("stale teardown removed live session: expected exactly %v signing, got %v", id, got)
 	}
 
 	// The live session B must still accept writes.
@@ -510,7 +569,224 @@ func TestRunSessionReconnectReplacesSession(t *testing.T) {
 
 	// B's death removes the session entirely.
 	connB.closeRead()
-	waitFor(t, func() bool { return len(h.Connected()) == 0 })
+	waitFor(t, func() bool { return len(h.Statuses()) == 0 })
+}
+
+// TestRunSessionPublishesOnlyAfterStatusFrame pins publication gating: a
+// session is published only after the greeting write and one valid status
+// frame. Before the handshake completes, the kiosk is invisible to the
+// broker — absent from the snapshot, unreachable by Push — and the first
+// frame flips it to a published, Ready session.
+func TestRunSessionPublishesOnlyAfterStatusFrame(t *testing.T) {
+	h, _ := newTestHub(nil)
+	id := uuid.New()
+	fc := newFakeConn()
+
+	// No frames queued: the session greets but must not publish.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.runSession(context.Background(), kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, fc)
+	}()
+	t.Cleanup(func() {
+		fc.closeRead()
+		<-done
+	})
+
+	waitFor(t, func() bool { return len(fc.recordedWrites()) >= 1 })
+	if got := h.Statuses(); len(got) != 0 {
+		t.Fatalf("session published before the status frame: %v", got)
+	}
+	if err := h.PushSign(context.Background(), id, "https://example.com"); !errors.Is(err, ErrNotConnected) {
+		t.Errorf("push to uninitialized session: expected ErrNotConnected, got %v", err)
+	}
+
+	// The first frame completes the handshake and publishes the session.
+	fc.queueFrame(textFrame(`{"type":"status","status":"ready"}`))
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusReady })
+	if err := h.PushSign(context.Background(), id, "https://example.com"); err != nil {
+		t.Errorf("push after handshake: %v", err)
+	}
+	assertPushedSign(t, fc, "https://example.com")
+}
+
+// TestRunSessionStatusTransitions pins the ready/signing lifecycle: the
+// initial frame establishes the published status, and each later transition
+// frame moves the snapshot. Frames are queued one at a time so every
+// intermediate state is observed before the next transition.
+func TestRunSessionStatusTransitions(t *testing.T) {
+	t.Run("initial signing", func(t *testing.T) {
+		h, _ := newTestHub(nil)
+		id := uuid.New()
+		fc := newFakeConn()
+		startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, fc,
+			textFrame(`{"type":"status","status":"signing"}`))
+
+		waitFor(t, func() bool { return h.Statuses()[id] == StatusSigning })
+		if got := h.Statuses(); len(got) != 1 || got[id] != StatusSigning {
+			t.Fatalf("expected exactly session %v signing, got %v", id, got)
+		}
+	})
+
+	t.Run("ready then signing then ready", func(t *testing.T) {
+		h, _ := newTestHub(nil)
+		id := uuid.New()
+		fc := newFakeConn()
+		startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, fc)
+		waitFor(t, func() bool { return h.Statuses()[id] == StatusReady })
+
+		fc.queueFrame(textFrame(`{"type":"status","status":"signing"}`))
+		waitFor(t, func() bool { return h.Statuses()[id] == StatusSigning })
+
+		fc.queueFrame(textFrame(`{"type":"status","status":"ready"}`))
+		waitFor(t, func() bool { return h.Statuses()[id] == StatusReady })
+	})
+}
+
+// TestRunSessionReconnectReportsSigningWhileSigning pins reconnect-while-
+// signing: when a signing kiosk disconnects and reconnects reporting signing
+// as its first frame, the replacement publishes with the signing status and
+// the session stays listed.
+func TestRunSessionReconnectReportsSigningWhileSigning(t *testing.T) {
+	h, _ := newTestHub(nil)
+	id := uuid.New()
+
+	connA := newFakeConn()
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connA)
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusReady })
+	connA.queueFrame(textFrame(`{"type":"status","status":"signing"}`))
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusSigning })
+
+	// The kiosk dies mid-signing and reconnects reporting signing first.
+	connA.closeRead()
+	waitFor(t, func() bool { return len(h.Statuses()) == 0 })
+
+	connB := newFakeConn()
+	startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
+		textFrame(`{"type":"status","status":"signing"}`))
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusSigning })
+	if got := h.Statuses(); len(got) != 1 || got[id] != StatusSigning {
+		t.Fatalf("expected exactly session %v signing after reconnect, got %v", id, got)
+	}
+}
+
+// TestRunSessionInvalidInitialFrames pins the handshake rejection: the
+// greeting is still written, but any malformed, invalid, or unknown initial
+// frame ends the session without publishing it.
+func TestRunSessionInvalidInitialFrames(t *testing.T) {
+	tests := []struct {
+		name  string
+		frame string
+	}{
+		{name: "empty", frame: ""},
+		{name: "not json", frame: "not json"},
+		{name: "json array", frame: `[1,2]`},
+		{name: "json string", frame: `"status"`},
+		{name: "null", frame: `null`},
+		{name: "unknown type", frame: `{"type":"connected","status":"ready"}`},
+		{name: "missing type", frame: `{"status":"ready"}`},
+		{name: "missing status", frame: `{"type":"status"}`},
+		{name: "unknown status", frame: `{"type":"status","status":"busy"}`},
+		{name: "wrong case", frame: `{"type":"status","status":"READY"}`},
+		{name: "status not a string", frame: `{"type":"status","status":1}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _ := newTestHub(nil)
+			id := uuid.New()
+			fc := newFakeConn()
+			done := startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, fc, textFrame(tt.frame))
+
+			// The greeting is still written; the invalid frame ends the
+			// session without publishing it.
+			waitFor(t, func() bool { return len(fc.recordedWrites()) >= 1 })
+			assertDone(t, "session teardown", done)
+			if got := h.Statuses(); len(got) != 0 {
+				t.Errorf("invalid initial frame published the session: %v", got)
+			}
+		})
+	}
+}
+
+// TestRunSessionStaleGenerationStatusIgnored pins generation-checked updates:
+// after a replacement, reports from the replaced connection are ignored (and
+// logged) instead of overwriting the current generation's status.
+func TestRunSessionStaleGenerationStatusIgnored(t *testing.T) {
+	h, buf := newTestHub(nil)
+	id := uuid.New()
+
+	// A publishes ready; B reconnects while signing and publishes with the
+	// signing status, proving the replacement is complete. A's read loop
+	// stays alive until its own socket closes.
+	connA := newFakeConn()
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connA)
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusReady })
+
+	connB := newFakeConn()
+	startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
+		textFrame(`{"type":"status","status":"signing"}`))
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusSigning })
+
+	// A's ready report arrives after the replacement published: it must be
+	// ignored, and the log proves the report was actually processed.
+	connA.queueFrame(textFrame(`{"type":"status","status":"ready"}`))
+	waitFor(t, func() bool { return strings.Contains(buf.String(), "stale generation") })
+
+	if got := h.Statuses()[id]; got != StatusSigning {
+		t.Fatalf("stale generation status stored: got %s, want signing", got)
+	}
+	// The current generation is unaffected and still receives pushes.
+	url := "https://docusign.example.com/signing/abc123"
+	if err := h.PushSign(context.Background(), id, url); err != nil {
+		t.Fatalf("push sign to current session: %v", err)
+	}
+	assertPushedSign(t, connB, url)
+}
+
+// TestRunSessionDisconnectedGenerationStatusIgnored pins generation-checked
+// updates after the identity is gone: a report from a connection whose
+// session was already removed is ignored (and logged), never resurrecting
+// the session in the snapshot.
+func TestRunSessionDisconnectedGenerationStatusIgnored(t *testing.T) {
+	h, buf := newTestHub(nil)
+	id := uuid.New()
+
+	connA := newFakeConn()
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connA)
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusReady })
+
+	// B replaces A, then dies: its teardown removes the identity entirely.
+	connB := newFakeConn()
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB)
+	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
+	connB.closeRead()
+	waitFor(t, func() bool { return len(h.Statuses()) == 0 })
+
+	// A's read loop survives the identity's removal; its signing report is
+	// ignored (logged), never resurrecting the session.
+	connA.queueFrame(textFrame(`{"type":"status","status":"signing"}`))
+	waitFor(t, func() bool { return strings.Contains(buf.String(), "no live session") })
+	if got := h.Statuses(); len(got) != 0 {
+		t.Fatalf("disconnected generation status stored: %v", got)
+	}
+}
+
+// TestStatusesReturnsCopy pins the snapshot contract: mutating the returned
+// map never affects hub state.
+func TestStatusesReturnsCopy(t *testing.T) {
+	h, _ := newTestHub(nil)
+	id := uuid.New()
+	fc := newFakeConn()
+	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, fc)
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusReady })
+
+	snapshot := h.Statuses()
+	delete(snapshot, id)
+	snapshot[uuid.New()] = StatusSigning
+
+	if got := h.Statuses(); len(got) != 1 || got[id] != StatusReady {
+		t.Fatalf("snapshot mutation leaked into hub state: %v", got)
+	}
 }
 
 func TestPushSignWritesSignMessage(t *testing.T) {
@@ -520,7 +796,7 @@ func TestPushSignWritesSignMessage(t *testing.T) {
 	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, fc)
 
 	waitFor(t, func() bool {
-		return slices.Contains(h.Connected(), id) && len(fc.recordedWrites()) >= 1
+		return published(h, id) && len(fc.recordedWrites()) >= 1
 	})
 
 	url := "https://docusign.example.com/signing/abc123"
@@ -545,7 +821,7 @@ func TestPushSignToUnregistered(t *testing.T) {
 			t.Error("unregistered push must not be ErrWriteFailed")
 		}
 	}
-	if got := h.Connected(); len(got) != 0 {
+	if got := h.Statuses(); len(got) != 0 {
 		t.Errorf("pushes to unknown kiosks must not publish sessions, got %v", got)
 	}
 }
@@ -558,7 +834,7 @@ func TestPushSignWriteFailureIsServerError(t *testing.T) {
 
 	// Fail only the PushSign write, after the greeting succeeded.
 	waitFor(t, func() bool {
-		return slices.Contains(h.Connected(), id) && len(fc.recordedWrites()) >= 1
+		return published(h, id) && len(fc.recordedWrites()) >= 1
 	})
 	underlying := errors.New("socket closed")
 	fc.setWriteErr(underlying)
@@ -588,6 +864,9 @@ func TestPushSignWriteFailureIsServerError(t *testing.T) {
 // across session selection and the write, so the replacement cannot publish
 // until the push completes. The prior-generation push therefore succeeds and
 // delivers to the old session, and only later pushes target the replacement.
+// The replacement reconnects while the kiosk is signing, so its handshake
+// status flips the snapshot from ready to signing exactly when publication
+// completes.
 func TestPushSignBlockedPushCompletesBeforeReplacement(t *testing.T) {
 	h, _ := newTestHub(nil)
 	id := uuid.New()
@@ -596,7 +875,7 @@ func TestPushSignBlockedPushCompletesBeforeReplacement(t *testing.T) {
 	connA := newFakeConn()
 	doneA := startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connA)
 	waitFor(t, func() bool {
-		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
+		return published(h, id) && len(connA.recordedWrites()) >= 1
 	})
 
 	// Gate connA's Writes: PushSign selects connA and blocks inside Write,
@@ -623,23 +902,22 @@ func TestPushSignBlockedPushCompletesBeforeReplacement(t *testing.T) {
 		t.Fatal("push sign did not block inside Write")
 	}
 
-	// While the push is blocked, the kiosk reconnects. Publication of the
-	// replacement waits on the identity boundary, so its greeting write — the
-	// publication completion signal — cannot begin before the push releases
-	// the boundary.
+	// While the push is blocked, the kiosk reconnects while signing. The
+	// replacement completes its handshake (greeting write, then its signing
+	// status frame), but publication waits on the identity boundary: the
+	// snapshot must keep the prior generation's ready until the push
+	// releases the boundary.
 	connB := newFakeConn()
-	gateB := make(chan struct{})
-	defer func() {
-		select {
-		case <-gateB:
-		default:
-			close(gateB)
-		}
-	}()
-	publishedB := make(chan struct{})
-	connB.setWriteGate(gateB, publishedB)
-	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB)
-	assertBlockedWhileGated(t, "replacement publication", publishedB)
+	startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
+		textFrame(`{"type":"status","status":"signing"}`))
+	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
+	// The handshake frame has been consumed: the replacement is inside the
+	// publication path, queued on the identity boundary the push holds, so
+	// the snapshot must still show the prior generation.
+	waitFor(t, func() bool { return connB.framesConsumed() >= 1 })
+	if got := h.Statuses()[id]; got != StatusReady {
+		t.Fatalf("replacement published while a push held the identity boundary: status = %s", got)
+	}
 
 	// Release the write: the push, ordered before the replacement, succeeds
 	// against the prior generation and delivers to connA.
@@ -654,15 +932,12 @@ func TestPushSignBlockedPushCompletesBeforeReplacement(t *testing.T) {
 	}
 	assertPushedSign(t, connA, url1)
 
-	// The queued replacement now publishes: its greeting write begins once
-	// the boundary is released, then completes and owns the session.
-	assertCompletesAfterRelease(t, "replacement publication", publishedB)
-	close(gateB)
-	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
-	if got := h.Connected(); len(got) != 1 || got[0] != id {
-		t.Fatalf("expected exactly session %v, got %v", id, got)
+	// The queued replacement now publishes with its reconnect-while-signing
+	// status and owns the session; the prior-generation push never reached it.
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusSigning })
+	if got := h.Statuses(); len(got) != 1 || got[id] != StatusSigning {
+		t.Fatalf("expected exactly session %v signing, got %v", id, got)
 	}
-	// connB never received the prior-generation push.
 	if writes := connB.recordedWrites(); len(writes) != 1 {
 		t.Fatalf("replacement conn got %d writes, want only the greeting", len(writes))
 	}
@@ -672,8 +947,8 @@ func TestPushSignBlockedPushCompletesBeforeReplacement(t *testing.T) {
 	// completed, so the assertion runs after A's runSession fully returned.
 	connA.closeRead()
 	assertDone(t, "stale session teardown", doneA)
-	if got := h.Connected(); len(got) != 1 || got[0] != id {
-		t.Fatalf("stale teardown removed live session: expected exactly %v, got %v", id, got)
+	if got := h.Statuses(); len(got) != 1 || got[id] != StatusSigning {
+		t.Fatalf("stale teardown removed live session: expected exactly %v signing, got %v", id, got)
 	}
 
 	// A push ordered after the replacement sees only the replacement.
@@ -701,7 +976,7 @@ func TestPushSignBlockedPushWriteErrorWithPendingReplacement(t *testing.T) {
 	connA := newFakeConn()
 	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connA)
 	waitFor(t, func() bool {
-		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
+		return published(h, id) && len(connA.recordedWrites()) >= 1
 	})
 
 	// The write itself will fail; the pending replacement must not mask the
@@ -731,22 +1006,21 @@ func TestPushSignBlockedPushWriteErrorWithPendingReplacement(t *testing.T) {
 		t.Fatal("push sign did not block inside Write")
 	}
 
-	// A reconnect queues behind the blocked push. The replacement's greeting
-	// write is gated, so the greeting write beginning is the publication
-	// completion signal.
+	// A reconnect queues behind the blocked push: the replacement completes
+	// its handshake (greeting write, then its signing status frame) but
+	// publication waits on the identity boundary, so the snapshot keeps the
+	// prior generation's ready until the push releases the boundary.
 	connB := newFakeConn()
-	gateB := make(chan struct{})
-	defer func() {
-		select {
-		case <-gateB:
-		default:
-			close(gateB)
-		}
-	}()
-	publishedB := make(chan struct{})
-	connB.setWriteGate(gateB, publishedB)
-	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB)
-	assertBlockedWhileGated(t, "replacement publication", publishedB)
+	startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
+		textFrame(`{"type":"status","status":"signing"}`))
+	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
+	// The handshake frame has been consumed: the replacement is inside the
+	// publication path, queued on the identity boundary the push holds, so
+	// the snapshot must still show the prior generation.
+	waitFor(t, func() bool { return connB.framesConsumed() >= 1 })
+	if got := h.Statuses()[id]; got != StatusReady {
+		t.Fatalf("replacement published while a push held the identity boundary: status = %s", got)
+	}
 
 	// Release the write: the push fails with the write error, wrapping both
 	// ErrWriteFailed and the underlying error.
@@ -779,12 +1053,11 @@ func TestPushSignBlockedPushWriteErrorWithPendingReplacement(t *testing.T) {
 		t.Errorf("expected no lost-push log, got: %s", logged)
 	}
 
-	// The queued replacement publishes and remains fully functional.
-	assertCompletesAfterRelease(t, "replacement publication", publishedB)
-	close(gateB)
-	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
-	if got := h.Connected(); len(got) != 1 || got[0] != id {
-		t.Fatalf("expected exactly session %v, got %v", id, got)
+	// The queued replacement publishes with its reconnect-while-signing
+	// status and remains fully functional.
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusSigning })
+	if got := h.Statuses(); len(got) != 1 || got[id] != StatusSigning {
+		t.Fatalf("expected exactly session %v signing, got %v", id, got)
 	}
 	url := "https://docusign.example.com/signing/def456"
 	if err := h.PushSign(context.Background(), id, url); err != nil {
@@ -806,7 +1079,7 @@ func TestPushSignBlockedPushCompletesBeforeRemoval(t *testing.T) {
 	connA := newFakeConn()
 	doneA := startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connA)
 	waitFor(t, func() bool {
-		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
+		return published(h, id) && len(connA.recordedWrites()) >= 1
 	})
 
 	// Gate connA's Writes: PushSign selects connA and blocks inside Write,
@@ -855,7 +1128,7 @@ func TestPushSignBlockedPushCompletesBeforeRemoval(t *testing.T) {
 	// The queued teardown now completes and removes the session: doneA closes
 	// only after CloseNow and the conditional teardown both completed.
 	assertCompletesAfterRelease(t, "session removal", doneA)
-	waitFor(t, func() bool { return len(h.Connected()) == 0 })
+	waitFor(t, func() bool { return len(h.Statuses()) == 0 })
 }
 
 // TestPushSignStalledWriteReleasedByCloseNow pins the session cleanup defer
@@ -871,7 +1144,7 @@ func TestPushSignStalledWriteReleasedByCloseNow(t *testing.T) {
 	connA := newFakeConn()
 	done := startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connA)
 	waitFor(t, func() bool {
-		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
+		return published(h, id) && len(connA.recordedWrites()) >= 1
 	})
 
 	// Arm close-release mode: the push's Write signals entered, then blocks
@@ -916,7 +1189,7 @@ func TestPushSignStalledWriteReleasedByCloseNow(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("session teardown did not finish after the stalled write was released")
 	}
-	waitFor(t, func() bool { return len(h.Connected()) == 0 })
+	waitFor(t, func() bool { return len(h.Statuses()) == 0 })
 
 	// Cleanup is idempotent: a second CloseNow after teardown must not panic.
 	connA.CloseNow()
@@ -930,15 +1203,15 @@ func TestPushSignAfterReplacementWritesToCurrentGeneration(t *testing.T) {
 	h, _ := newTestHub(nil)
 	id := uuid.New()
 
-	// connA is replaced by connB; B's greeting proves B published.
 	connA := newFakeConn()
 	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connA)
 	waitFor(t, func() bool {
-		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
+		return published(h, id) && len(connA.recordedWrites()) >= 1
 	})
 	connB := newFakeConn()
-	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB)
-	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
+	startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
+		textFrame(`{"type":"status","status":"signing"}`))
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusSigning })
 
 	// Arm connA's write gate so any (forbidden) post-replacement delivery to
 	// the old session would block and be observable as an in-flight write.
@@ -986,11 +1259,11 @@ func TestPushSignAfterDisconnectIsNotConnected(t *testing.T) {
 	connA := newFakeConn()
 	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connA)
 	waitFor(t, func() bool {
-		return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
+		return published(h, id) && len(connA.recordedWrites()) >= 1
 	})
 
 	connA.closeRead()
-	waitFor(t, func() bool { return len(h.Connected()) == 0 })
+	waitFor(t, func() bool { return len(h.Statuses()) == 0 })
 
 	err := h.PushSign(context.Background(), id, "https://example.com")
 	if !errors.Is(err, ErrNotConnected) {
@@ -1005,8 +1278,8 @@ func TestPushSignAfterDisconnectIsNotConnected(t *testing.T) {
 // an old-generation teardown racing a replacement publication on the same
 // identity. Both operations queue behind a Push holding the identity
 // boundary; whichever wins the boundary after the push releases, the
-// replacement must end up reachable: Connected reports it and Push delivers
-// to it. The old teardown can neither remove the replacement (when
+// replacement must end up reachable: the status snapshot reports it and Push
+// delivers to it. The old teardown can neither remove the replacement (when
 // publication wins) nor orphan it (when teardown wins and publication must
 // install a fresh live identity instead of writing into the detached one).
 func TestTeardownRacingReplacementLeavesReplacementLive(t *testing.T) {
@@ -1018,7 +1291,7 @@ func TestTeardownRacingReplacementLeavesReplacementLive(t *testing.T) {
 		connA := newFakeConn()
 		doneA := startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connA)
 		waitFor(t, func() bool {
-			return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
+			return published(h, id) && len(connA.recordedWrites()) >= 1
 		})
 
 		// Hold the identity boundary with a gated Push.
@@ -1048,22 +1321,21 @@ func TestTeardownRacingReplacementLeavesReplacementLive(t *testing.T) {
 		connA.closeRead()
 		assertBlockedWhileGated(t, "session removal", doneA)
 
-		// The replacement connection queues behind the old teardown. Its
-		// greeting write is gated, so the greeting write beginning is the
-		// publication completion signal.
+		// The replacement connection queues behind the old teardown: its
+		// handshake completes (greeting write, then its signing status
+		// frame), but publication cannot complete while either the push or
+		// the old teardown holds the identity boundary.
 		connB := newFakeConn()
-		gateB := make(chan struct{})
-		defer func() {
-			select {
-			case <-gateB:
-			default:
-				close(gateB)
-			}
-		}()
-		publishedB := make(chan struct{})
-		connB.setWriteGate(gateB, publishedB)
-		startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB)
-		assertBlockedWhileGated(t, "replacement publication", publishedB)
+		startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
+			textFrame(`{"type":"status","status":"signing"}`))
+		waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
+		// The handshake frame has been consumed: the replacement is inside
+		// the publication path, queued on the identity boundary, so the
+		// snapshot must still show the prior generation.
+		waitFor(t, func() bool { return connB.framesConsumed() >= 1 })
+		if got := h.Statuses()[id]; got != StatusReady {
+			t.Fatalf("replacement published while the identity boundary was held: status = %s", got)
+		}
 
 		// Release the push: the old teardown, queued first, wins the boundary
 		// and removes the old session; the replacement then publishes into a
@@ -1079,15 +1351,13 @@ func TestTeardownRacingReplacementLeavesReplacementLive(t *testing.T) {
 		}
 		assertPushedSign(t, connA, url1)
 
-		assertCompletesAfterRelease(t, "replacement publication", publishedB)
-		close(gateB)
-		waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
+		waitFor(t, func() bool { return h.Statuses()[id] == StatusSigning })
 		assertCompletesAfterRelease(t, "old teardown", doneA)
 
-		// The replacement is the live session: Connected reports it and Push
-		// delivers to it; the old teardown removed nothing.
-		if got := h.Connected(); len(got) != 1 || got[0] != id {
-			t.Fatalf("replacement must stay reachable: expected exactly session %v, got %v", id, got)
+		// The replacement is the live session: the snapshot reports it
+		// signing and Push delivers to it; the old teardown removed nothing.
+		if got := h.Statuses(); len(got) != 1 || got[id] != StatusSigning {
+			t.Fatalf("replacement must stay reachable: expected exactly %v signing, got %v", id, got)
 		}
 		url2 := "https://docusign.example.com/signing/def456"
 		if err := h.PushSign(context.Background(), id, url2); err != nil {
@@ -1106,7 +1376,7 @@ func TestTeardownRacingReplacementLeavesReplacementLive(t *testing.T) {
 		connA := newFakeConn()
 		doneA := startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connA)
 		waitFor(t, func() bool {
-			return slices.Contains(h.Connected(), id) && len(connA.recordedWrites()) >= 1
+			return published(h, id) && len(connA.recordedWrites()) >= 1
 		})
 
 		release := make(chan struct{})
@@ -1130,21 +1400,20 @@ func TestTeardownRacingReplacementLeavesReplacementLive(t *testing.T) {
 			t.Fatal("push sign did not block inside Write")
 		}
 
-		// The replacement queues first: its publication cannot complete while
-		// the push holds the boundary.
+		// The replacement queues first: its handshake completes (greeting
+		// write, then its signing status frame), but publication cannot
+		// complete while the push holds the identity boundary.
 		connB := newFakeConn()
-		gateB := make(chan struct{})
-		defer func() {
-			select {
-			case <-gateB:
-			default:
-				close(gateB)
-			}
-		}()
-		publishedB := make(chan struct{})
-		connB.setWriteGate(gateB, publishedB)
-		startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB)
-		assertBlockedWhileGated(t, "replacement publication", publishedB)
+		startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
+			textFrame(`{"type":"status","status":"signing"}`))
+		waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
+		// The handshake frame has been consumed: the replacement is inside
+		// the publication path, queued on the identity boundary, so the
+		// snapshot must still show the prior generation.
+		waitFor(t, func() bool { return connB.framesConsumed() >= 1 })
+		if got := h.Statuses()[id]; got != StatusReady {
+			t.Fatalf("replacement published while the identity boundary was held: status = %s", got)
+		}
 
 		// The old session disconnects after the replacement queued: its
 		// teardown waits behind the pending publication.
@@ -1165,15 +1434,13 @@ func TestTeardownRacingReplacementLeavesReplacementLive(t *testing.T) {
 		}
 		assertPushedSign(t, connA, url1)
 
-		assertCompletesAfterRelease(t, "replacement publication", publishedB)
-		close(gateB)
-		waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
+		waitFor(t, func() bool { return h.Statuses()[id] == StatusSigning })
 		assertCompletesAfterRelease(t, "old teardown", doneA)
 
-		// The replacement is the live session: Connected reports it and Push
-		// delivers to it; the old teardown removed nothing.
-		if got := h.Connected(); len(got) != 1 || got[0] != id {
-			t.Fatalf("replacement must stay reachable: expected exactly session %v, got %v", id, got)
+		// The replacement is the live session: the snapshot reports it
+		// signing and Push delivers to it; the old teardown removed nothing.
+		if got := h.Statuses(); len(got) != 1 || got[id] != StatusSigning {
+			t.Fatalf("replacement must stay reachable: expected exactly %v signing, got %v", id, got)
 		}
 		url2 := "https://docusign.example.com/signing/def456"
 		if err := h.PushSign(context.Background(), id, url2); err != nil {
@@ -1199,7 +1466,7 @@ func TestPushBlockedOnOneKioskDoesNotBlockAnother(t *testing.T) {
 	connB := newFakeConn()
 	doneB := startSession(t, h, kiosks.Kiosk{ID: id2, Name: "lobby", IP: "10.0.0.5"}, connB)
 	waitFor(t, func() bool {
-		return len(h.Connected()) == 2 && len(connA.recordedWrites()) >= 1 && len(connB.recordedWrites()) >= 1
+		return len(h.Statuses()) == 2 && len(connA.recordedWrites()) >= 1 && len(connB.recordedWrites()) >= 1
 	})
 
 	// Block a push for kiosk id1 inside its write.
@@ -1270,9 +1537,9 @@ func TestPushBlockedOnOneKioskDoesNotBlockAnother(t *testing.T) {
 	// completed, so the assertion runs after B's runSession fully returned.
 	connB.closeRead()
 	assertDone(t, "stale session teardown", doneB)
-	got := h.Connected()
-	if len(got) != 2 || !slices.Contains(got, id1) || !slices.Contains(got, id2) {
-		t.Fatalf("expected sessions %v and %v, got %v", id1, id2, got)
+	got := h.Statuses()
+	if len(got) != 2 || got[id1] != StatusReady || got[id2] != StatusReady {
+		t.Fatalf("expected sessions %v and %v ready, got %v", id1, id2, got)
 	}
 }
 
@@ -1293,6 +1560,7 @@ func TestConcurrent(t *testing.T) {
 		sessionsWG.Add(1)
 		go func() {
 			defer sessionsWG.Done()
+			fc.queueFrame(textFrame(`{"type":"status","status":"ready"}`))
 			h.runSession(context.Background(), kiosks.Kiosk{ID: id, Name: "kiosk", IP: "10.0.0.5"}, fc)
 		}()
 	}
@@ -1303,7 +1571,7 @@ func TestConcurrent(t *testing.T) {
 		go func() {
 			defer churnWG.Done()
 			for range iterations {
-				h.Connected()
+				h.Statuses()
 				_ = h.PushSign(context.Background(), ids[rand.IntN(sessions)], "https://example.com")
 			}
 		}()
@@ -1313,6 +1581,6 @@ func TestConcurrent(t *testing.T) {
 	for _, fc := range conns {
 		fc.closeRead()
 	}
-	waitFor(t, func() bool { return len(h.Connected()) == 0 })
+	waitFor(t, func() bool { return len(h.Statuses()) == 0 })
 	sessionsWG.Wait()
 }

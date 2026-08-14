@@ -19,6 +19,8 @@ class FakeWebSocket {
   onclose: ((ev: CloseEvent) => void) | null = null;
   onerror: ((ev: Event) => void) | null = null;
   closed = false;
+  // Client-origin frames (kiosk -> broker), in send order.
+  sent: string[] = [];
 
   constructor(url: string) {
     this.url = url;
@@ -27,6 +29,10 @@ class FakeWebSocket {
 
   open(): void {
     this.onopen?.(new Event("open"));
+  }
+
+  send(data: string): void {
+    this.sent.push(data);
   }
 
   message(data: string): void {
@@ -155,12 +161,67 @@ describe("App kiosk recovery flow", () => {
 
     expect(screen.getByText("Ready for member")).toBeTruthy();
     expect(screen.getByText("Front Desk Lobby")).toBeTruthy();
-    // Every exhausted socket was torn down; nothing is left open.
+    // The greeting is answered with the kiosk's exact ready frame on the
+    // current socket.
+    expect(fresh.sent).toEqual(['{"type":"status","status":"ready"}']);
+    // Every exhausted socket was torn down before any greeting, so none
+    // ever sent a client frame; nothing is left open.
     expect(
       FakeWebSocket.instances
         .slice(0, socketsBeforeReopen)
-        .every((s) => s.closed),
+        .every((s) => s.closed && s.sent.length === 0),
     ).toBe(true);
+  });
+});
+
+describe("App signing status frames", () => {
+  it("reports ready on greeting, signing on sign, and ready on completion", async () => {
+    const { container } = render(App);
+    const socket = lastSocket();
+
+    // Greeting: the kiosk's first client frame is the exact ready frame
+    // and the view settles on the waiting screen.
+    socket.message(JSON.stringify({ type: "connected", name: "Front Desk Lobby" }));
+    await tick();
+    expect(screen.getByText("Ready for member")).toBeTruthy();
+    expect(screen.getByText("Front Desk Lobby")).toBeTruthy();
+    expect(socket.sent).toEqual(['{"type":"status","status":"ready"}']);
+
+    // Sign: the broker pushes a signing URL; the kiosk reports signing and
+    // mounts the DocuSign iframe.
+    socket.message(JSON.stringify({ type: "sign", url: "https://sign.example/abc" }));
+    await tick();
+    const iframe = container.querySelector("iframe");
+    expect(iframe).not.toBeNull();
+    expect((iframe as HTMLIFrameElement).src).toBe("https://sign.example/abc");
+    expect(screen.queryByText("Ready for member")).toBeNull();
+    expect(socket.sent).toEqual([
+      '{"type":"status","status":"ready"}',
+      '{"type":"status","status":"signing"}',
+    ]);
+
+    // The iframe's first load only arms the completion path: the kiosk
+    // stays signing and no ready frame is sent yet.
+    await fireEvent.load(iframe!);
+    await tick();
+    expect(container.querySelector("iframe")).not.toBeNull();
+    expect(screen.queryByText("Ready for member")).toBeNull();
+    expect(socket.sent).toEqual([
+      '{"type":"status","status":"ready"}',
+      '{"type":"status","status":"signing"}',
+    ]);
+
+    // The second load reports the signing flow complete: the exact ready
+    // frame is sent and the waiting screen returns.
+    await fireEvent.load(container.querySelector("iframe")!);
+    await tick();
+    expect(screen.getByText("Ready for member")).toBeTruthy();
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(socket.sent).toEqual([
+      '{"type":"status","status":"ready"}',
+      '{"type":"status","status":"signing"}',
+      '{"type":"status","status":"ready"}',
+    ]);
   });
 });
 
