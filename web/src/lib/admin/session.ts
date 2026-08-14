@@ -33,10 +33,7 @@ export interface AdminSessionChannel {
 }
 
 export interface AdminSessionLockManager {
-  request<T>(
-    name: string,
-    callback: (lock: unknown) => Promise<T> | T,
-  ): Promise<T>;
+  request<T>(name: string, callback: () => Promise<T> | T): Promise<T>;
 }
 
 export interface AdminSessionOptions {
@@ -83,7 +80,12 @@ export class AdminSessionController {
     if (message === null || message.tabId === this.tabId || this.closed) return;
 
     if (message.type === "token-request") {
-      if (this.jwt !== null && this.isFreshJwt(this.jwt)) {
+      // A signing-out tab must not serve its soon-revoked JWT to peers.
+      if (
+        this.state.status !== "signing-out" &&
+        this.jwt !== null &&
+        this.isFreshJwt(this.jwt)
+      ) {
         this.postMessage({
           type: "token",
           tabId: this.tabId,
@@ -96,6 +98,8 @@ export class AdminSessionController {
     }
 
     if (message.type === "token") {
+      // Peer token broadcasts must not invalidate a pending logout.
+      if (this.state.status === "signing-out") return;
       if (message.targetTabId !== null && message.targetTabId !== this.tabId) return;
       if (!this.isFreshJwt(message.jwt)) return;
 
@@ -112,9 +116,7 @@ export class AdminSessionController {
       return;
     }
 
-    ++this.operation;
-    this.clearProtectedState();
-    this.update({ status: "login", submitting: false });
+    this.localTerminalTransition();
   };
 
   constructor(options: AdminSessionOptions) {
@@ -272,9 +274,8 @@ export class AdminSessionController {
   terminalAuthenticationLoss(): void {
     if (this.closed) return;
 
-    ++this.operation;
-    this.clearProtectedState();
-    this.update({ status: "login", submitting: false });
+    // Local-origin loss: this tab's own fetch failed, so peers must hear about it.
+    this.localTerminalTransition();
     this.postMessage({
       type: "terminal",
       tabId: this.tabId,
@@ -529,6 +530,15 @@ export class AdminSessionController {
 
   private clearProtectedState(): void {
     this.jwt = null;
+  }
+
+  // Terminal loss observed by this tab (own fetch or a peer terminal/logout
+  // message): cancel the in-flight operation, drop the JWT, and show login.
+  // Broadcasting is the caller's choice so peer-derived messages stay local.
+  private localTerminalTransition(): void {
+    ++this.operation;
+    this.clearProtectedState();
+    this.update({ status: "login", submitting: false });
   }
 
   private isCurrent(operation: number): boolean {

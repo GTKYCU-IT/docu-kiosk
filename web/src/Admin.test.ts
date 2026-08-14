@@ -3,26 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vite
 import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import Admin from "./Admin.svelte";
 import { AdminSessionController } from "$lib/admin/session";
-import { response } from "$lib/admin/test-response";
+import { response, testJwt } from "$lib/admin/test-response";
 
 let fetchMock: Mock;
-
-/** Structurally valid JWT with a future exp, satisfying the session freshness check. */
-function freshAccessToken(): string {
-  const segment = (value: unknown): string =>
-    btoa(JSON.stringify(value))
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "");
-  return [
-    segment({ alg: "none", typ: "JWT" }),
-    segment({
-      sub: "administrator",
-      exp: Math.floor(Date.now() / 1_000) + 3_600,
-    }),
-    "signature",
-  ].join(".");
-}
 
 beforeEach(() => {
   fetchMock = vi.fn();
@@ -85,7 +68,7 @@ describe("Admin restoration", () => {
     );
     expect(screen.queryByText("Broker unavailable")).toBeNull();
 
-    const restoredJwt = freshAccessToken();
+    const restoredJwt = testJwt();
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     resolveRetry(response(200, { jwt: restoredJwt }));
     expect(
@@ -128,7 +111,7 @@ describe("Admin login", () => {
   });
 
   it("replaces the form in place after successful login without rendering the JWT", async () => {
-    const loginJwt = freshAccessToken();
+    const loginJwt = testJwt();
     fetchMock
       .mockResolvedValueOnce(response(401))
       .mockResolvedValueOnce(response(200, { jwt: loginJwt }));
@@ -160,7 +143,7 @@ describe("Admin logout", () => {
   it("keeps the authenticated surface visible and disables sign out while it is in flight", async () => {
     let resolveLogout!: (value: Response) => void;
     fetchMock
-      .mockResolvedValueOnce(response(200, { jwt: freshAccessToken() }))
+      .mockResolvedValueOnce(response(200, { jwt: testJwt() }))
       .mockImplementationOnce(
         () =>
           new Promise<Response>((resolve) => {
@@ -197,7 +180,7 @@ describe("Admin logout", () => {
     ["a network failure", () => Promise.reject(new Error("offline"))],
   ])("keeps the authenticated view and reports failure after %s", async (_name, outcome) => {
     fetchMock
-      .mockResolvedValueOnce(response(200, { jwt: freshAccessToken() }))
+      .mockResolvedValueOnce(response(200, { jwt: testJwt() }))
       .mockImplementationOnce(outcome);
     render(Admin);
     await screen.findByRole("heading", {
@@ -221,7 +204,7 @@ describe("Admin logout", () => {
 
   it("clears the authenticated view in place only after logout returns 204", async () => {
     fetchMock
-      .mockResolvedValueOnce(response(200, { jwt: freshAccessToken() }))
+      .mockResolvedValueOnce(response(200, { jwt: testJwt() }))
       .mockResolvedValueOnce(response(204));
     render(Admin);
     await screen.findByRole("heading", {
@@ -242,7 +225,7 @@ describe("Admin logout", () => {
 
   it("returns to clean sign in when logout reports terminal authentication loss", async () => {
     fetchMock
-      .mockResolvedValueOnce(response(200, { jwt: freshAccessToken() }))
+      .mockResolvedValueOnce(response(200, { jwt: testJwt() }))
       .mockResolvedValueOnce(response(401));
     render(Admin);
     await screen.findByRole("heading", {
@@ -268,7 +251,7 @@ describe("Admin teardown", () => {
   it("closes the session controller when the page unmounts", async () => {
     const close = vi.spyOn(AdminSessionController.prototype, "close");
 
-    fetchMock.mockResolvedValue(response(200, { jwt: freshAccessToken() }));
+    fetchMock.mockResolvedValue(response(200, { jwt: testJwt() }));
     const { unmount } = render(Admin);
     await screen.findByRole("heading", {
       name: "Administrator session active",

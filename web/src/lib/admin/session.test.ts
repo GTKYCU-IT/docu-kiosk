@@ -7,25 +7,9 @@ import {
   type AdminSessionOptions,
   type AdminSessionState,
 } from "./session";
-import { response } from "./test-response";
+import { response, testJwt } from "./test-response";
 
 const NOW = 2_000_000_000_000;
-
-function jwtExpiringAt(expiresAt: number): string {
-  const header = btoa(JSON.stringify({ alg: "none", typ: "JWT" }))
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
-  const payload = btoa(JSON.stringify({ exp: expiresAt / 1_000 }))
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
-  return `${header}.${payload}.signature`;
-}
-
-function freshJwt(lifetimeMs = 60_000): string {
-  return jwtExpiringAt(NOW + lifetimeMs);
-}
 
 class TestChannelBus {
   readonly channels = new Set<TestChannel>();
@@ -85,21 +69,15 @@ class SerialLocks implements AdminSessionLockManager {
   readonly requestedNames: string[] = [];
   private successor: Promise<unknown> = Promise.resolve();
 
-  request<T>(
-    name: string,
-    callback: (lock: unknown) => Promise<T> | T,
-  ): Promise<T> {
+  request<T>(name: string, callback: () => Promise<T> | T): Promise<T> {
     this.requestedNames.push(name);
-    const result = this.successor.then(() => callback({ name }));
+    const result = this.successor.then(() => callback());
     this.successor = result.catch(() => undefined);
     return result;
   }
 }
 
-type SessionOverrides = Omit<
-  AdminSessionOptions,
-  "fetch" | "onChange" | "now"
-> & { now?: () => number };
+type SessionOverrides = Omit<AdminSessionOptions, "fetch" | "onChange">;
 
 function createSession(fetchMock: Mock, overrides: SessionOverrides = {}) {
   const states: AdminSessionState[] = [];
@@ -118,7 +96,7 @@ function createSession(fetchMock: Mock, overrides: SessionOverrides = {}) {
 describe("AdminSessionController refresh coordination", () => {
   it("reuses a fresh peer token without contacting refresh", async () => {
     const bus = new TestChannelBus();
-    const ownerFetch = vi.fn().mockResolvedValue(response(200, { jwt: freshJwt() }));
+    const ownerFetch = vi.fn().mockResolvedValue(response(200, { jwt: testJwt(NOW + 60_000) }));
     const peerFetch = vi.fn();
     const owner = createSession(ownerFetch, {
       channel: bus.open(),
@@ -138,7 +116,7 @@ describe("AdminSessionController refresh coordination", () => {
   });
 
   it("falls back to its own refresh when cross-tab APIs are unavailable", async () => {
-    const token = freshJwt();
+    const token = testJwt(NOW + 60_000);
     const fetchMock = vi.fn().mockResolvedValue(response(200, { jwt: token }));
     const { session } = createSession(fetchMock);
 
@@ -151,9 +129,9 @@ describe("AdminSessionController refresh coordination", () => {
   it("allows only one concurrent refresh and reuses its successor token", async () => {
     const bus = new TestChannelBus();
     const locks = new SerialLocks();
-    const token = freshJwt();
+    const token = testJwt(NOW + 60_000);
     const firstFetch = vi.fn().mockResolvedValue(response(200, { jwt: token }));
-    const secondFetch = vi.fn().mockResolvedValue(response(200, { jwt: freshJwt(90_000) }));
+    const secondFetch = vi.fn().mockResolvedValue(response(200, { jwt: testJwt(NOW + 90_000) }));
     const first = createSession(firstFetch, {
       channel: bus.open(),
       locks,
@@ -178,8 +156,8 @@ describe("AdminSessionController refresh coordination", () => {
   });
 
   it("requires expiration to be more than five seconds away", async () => {
-    const boundaryToken = jwtExpiringAt(NOW + 5_000);
-    const freshBoundaryToken = jwtExpiringAt(NOW + 5_001);
+    const boundaryToken = testJwt(NOW + 5_000);
+    const freshBoundaryToken = testJwt(NOW + 5_001);
     const stale = createSession(
       vi.fn().mockResolvedValue(response(200, { jwt: boundaryToken })),
     ).session;
@@ -199,7 +177,7 @@ describe("AdminSessionController refresh coordination", () => {
   it("does not rotate a token merely because time advances", async () => {
     let now = NOW;
     const fetchMock = vi.fn().mockResolvedValue(
-      response(200, { jwt: jwtExpiringAt(NOW + 60_000) }),
+      response(200, { jwt: testJwt(NOW + 60_000) }),
     );
     const { session } = createSession(fetchMock, { now: () => now });
     await session.restore();
@@ -214,8 +192,8 @@ describe("AdminSessionController refresh coordination", () => {
 
 describe("AdminSessionController protected requests", () => {
   it("sends a bearer token and refreshes then retries once after a 401", async () => {
-    const firstToken = freshJwt();
-    const successorToken = freshJwt(120_000);
+    const firstToken = testJwt(NOW + 60_000);
+    const successorToken = testJwt(NOW + 120_000);
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(response(200, { jwt: firstToken }))
@@ -242,7 +220,7 @@ describe("AdminSessionController protected requests", () => {
 
   it("propagates a refresh 401 as terminal loss without retrying", async () => {
     const bus = new TestChannelBus();
-    const token = freshJwt();
+    const token = testJwt(NOW + 60_000);
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(response(200, { jwt: token }))
@@ -270,9 +248,9 @@ describe("AdminSessionController protected requests", () => {
     const bus = new TestChannelBus();
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(response(200, { jwt: freshJwt() }))
+      .mockResolvedValueOnce(response(200, { jwt: testJwt(NOW + 60_000) }))
       .mockResolvedValueOnce(response(401))
-      .mockResolvedValueOnce(response(200, { jwt: freshJwt(120_000) }))
+      .mockResolvedValueOnce(response(200, { jwt: testJwt(NOW + 120_000) }))
       .mockResolvedValueOnce(response(401));
     const owner = createSession(fetchMock, {
       channel: bus.open(),
@@ -296,7 +274,7 @@ describe("AdminSessionController protected requests", () => {
 describe("AdminSessionController cross-tab lifecycle", () => {
   it("shares a successful login token", async () => {
     const bus = new TestChannelBus();
-    const token = freshJwt();
+    const token = testJwt(NOW + 60_000);
     const ownerFetch = vi
       .fn()
       .mockResolvedValueOnce(response(401))
@@ -320,7 +298,7 @@ describe("AdminSessionController cross-tab lifecycle", () => {
 
   it("broadcasts logout only after a confirmed 204", async () => {
     const bus = new TestChannelBus();
-    const token = freshJwt();
+    const token = testJwt(NOW + 60_000);
     const ownerFetch = vi
       .fn()
       .mockResolvedValueOnce(response(200, { jwt: token }))
@@ -346,6 +324,83 @@ describe("AdminSessionController cross-tab lifecycle", () => {
     expect(peer.getState()).toEqual({ status: "login", submitting: false });
   });
 
+  it("keeps a signing-out tab from accepting peer tokens or serving its JWT", async () => {
+    const bus = new TestChannelBus();
+    const token = testJwt(NOW + 60_000);
+    let resolveLogout!: (value: Response | PromiseLike<Response>) => void;
+    const logoutPromise = new Promise<Response>((res) => {
+      resolveLogout = res;
+    });
+    const ownerChannel = bus.open();
+    // Record the owner's outbound messages so "serves no token" is observable.
+    const posted: AdminSessionMessage[] = [];
+    const owner = createSession(
+      vi
+        .fn()
+        .mockResolvedValueOnce(response(200, { jwt: token }))
+        .mockReturnValueOnce(logoutPromise),
+      {
+        channel: {
+          postMessage: (message) => {
+            posted.push(message);
+            ownerChannel.postMessage(message);
+          },
+          addEventListener: (type, listener) =>
+            ownerChannel.addEventListener(type, listener),
+          removeEventListener: (type, listener) =>
+            ownerChannel.removeEventListener(type, listener),
+          close: () => ownerChannel.close(),
+        },
+        tabId: "owner",
+      },
+    ).session;
+    const peer = createSession(vi.fn(), {
+      channel: bus.open(),
+      tabId: "peer",
+    }).session;
+    await owner.restore();
+    expect(peer.getState()).toEqual({ status: "authenticated" });
+
+    // The logout request is deferred, leaving the initiating tab signing-out.
+    const signingOut = owner.logout();
+    expect(owner.getState()).toEqual({ status: "signing-out" });
+
+    // A peer refresh/login broadcasts its token while the logout is pending:
+    // the signing-out tab must not accept it or invalidate its logout.
+    bus.open().postMessage({
+      type: "token",
+      tabId: "intruder",
+      requestId: "intruder-broadcast",
+      targetTabId: null,
+      jwt: testJwt(NOW + 120_000),
+    });
+    expect(owner.getState()).toEqual({ status: "signing-out" });
+    expect(owner.getAccessToken()).toBe(token);
+
+    // A token request must go unanswered: the signing-out JWT is soon revoked.
+    bus.open().postMessage({
+      type: "token-request",
+      tabId: "intruder",
+      requestId: "intruder-request",
+    });
+    expect(
+      posted.some(
+        (message) =>
+          message.type === "token" && message.requestId === "intruder-request",
+      ),
+    ).toBe(false);
+
+    // The confirmed 204 still completes the logout for both tabs.
+    resolveLogout(response(204));
+    await signingOut;
+
+    expect(owner.getState()).toEqual({ status: "login", submitting: false });
+    expect(owner.getAccessToken()).toBeNull();
+    expect(peer.getState()).toEqual({ status: "login", submitting: false });
+    expect(peer.getAccessToken()).toBeNull();
+    expect(posted.some((message) => message.type === "logout")).toBe(true);
+  });
+
   it("close cancels a late refresh and detaches cross-tab messages", async () => {
     const bus = new TestChannelBus();
     let resolve!: (value: Response | PromiseLike<Response>) => void;
@@ -365,7 +420,7 @@ describe("AdminSessionController cross-tab lifecycle", () => {
       tabId: "peer",
       requestId: "terminal-after-close",
     });
-    resolve(response(200, { jwt: freshJwt() }));
+    resolve(response(200, { jwt: testJwt(NOW + 60_000) }));
     await restoring;
 
     expect(session.getAccessToken()).toBeNull();
@@ -378,7 +433,7 @@ describe("AdminSessionController cross-tab lifecycle", () => {
 
 describe("AdminSessionController state transitions", () => {
   it("keeps restoration retryable after a transient failure", async () => {
-    const token = freshJwt();
+    const token = testJwt(NOW + 60_000);
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(response(503))
@@ -412,7 +467,7 @@ describe("AdminSessionController state transitions", () => {
   });
 
   it("retains the active token when logout fails", async () => {
-    const token = freshJwt();
+    const token = testJwt(NOW + 60_000);
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(response(200, { jwt: token }))
@@ -438,7 +493,7 @@ describe("AdminSessionController state transitions", () => {
     const restoring = session.restore();
 
     session.terminalAuthenticationLoss();
-    resolve(response(200, { jwt: freshJwt() }));
+    resolve(response(200, { jwt: testJwt(NOW + 60_000) }));
     await restoring;
 
     expect(session.getState()).toEqual({ status: "login", submitting: false });
