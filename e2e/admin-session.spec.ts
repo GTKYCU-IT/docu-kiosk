@@ -63,6 +63,16 @@ async function setCookieOf(response: Response): Promise<string | undefined> {
   return headers.find(h => h.name.toLowerCase() === 'set-cookie')?.value
 }
 
+// The only helper that reads the refresh credential out of the browser
+// profile: it owns the cookie name and fails clearly when the session cookie
+// is missing, so tests never re-hardcode the name or assert existence inline
+// just to obtain the value.
+async function refreshTokenOf(context: BrowserContext): Promise<string> {
+  const cookie = (await context.cookies()).find(c => c.name === 'refresh_token')
+  expect(cookie, 'expected the refresh_token session cookie in the browser profile').toBeDefined()
+  return cookie!.value
+}
+
 // The only helper that owns the sign-in preamble: navigation, login heading
 // wait, form submission, and the authenticated wait. The /login response
 // waiter is registered before the submit click so the response cannot slip
@@ -167,7 +177,7 @@ test('signs in and takes custody of a host-only HttpOnly Secure SameSite=Strict 
 
 test('reload restores the session silently via cookie rotation', async ({ page, context }) => {
   await signIn(page)
-  const tokenBefore = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  const tokenBefore = await refreshTokenOf(context)
 
   // Hold the restore refresh open so the neutral state is observable and no
   // login form can flash through.
@@ -190,7 +200,7 @@ test('reload restores the session silently via cookie rotation', async ({ page, 
 
   // Rotation replaced the credential: the successor differs from the one the
   // pre-reload session held.
-  const tokenAfter = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  const tokenAfter = await refreshTokenOf(context)
   expect(tokenAfter).not.toBe(tokenBefore)
 })
 
@@ -210,7 +220,7 @@ test('shows Broker unavailable when restore fails and Retry recovers', async ({ 
 
 test('signs out: revokes before clearing, returns to login, and rejects replay', async ({ page, context }) => {
   await signIn(page)
-  const token = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  const token = await refreshTokenOf(context)
 
   const logoutPromise = page.waitForResponse(r => r.url().endsWith('/logout') && r.request().method() === 'POST')
   await page.getByRole('button', { name: 'Sign out' }).click()
@@ -259,12 +269,12 @@ function trackAuthPosts(context: BrowserContext, path: string): () => number {
 test('a new tab restores from the peer access JWT without refreshing', async ({ page, context }) => {
   await signIn(page)
   const refreshCount = trackAuthPosts(context, '/refresh')
-  const tokenBefore = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  const tokenBefore = await refreshTokenOf(context)
 
   const peer = await openAuthenticatedPeerTab(context)
 
   expect(refreshCount()).toBe(0)
-  const tokenAfter = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  const tokenAfter = await refreshTokenOf(context)
   expect(tokenAfter).toBe(tokenBefore)
 })
 
@@ -281,7 +291,7 @@ test('concurrent near-expiry restores rotate the cookie exactly once and converg
   const peer = await openAuthenticatedPeerTab(context)
 
   const refreshCount = trackAuthPosts(context, '/refresh')
-  const tokenBefore = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  const tokenBefore = await refreshTokenOf(context)
 
   // Age the shared JWT inside the five-second expiry safety window in real
   // time: neither tab may restore from its peer, so both reloads demand
@@ -295,7 +305,7 @@ test('concurrent near-expiry restores rotate the cookie exactly once and converg
   await expect(peer.getByRole('heading', { name: LOGIN_HEADING })).not.toBeVisible()
 
   expect(refreshCount()).toBe(1)
-  const tokenAfter = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  const tokenAfter = await refreshTokenOf(context)
   expect(tokenAfter).not.toBe(tokenBefore)
 })
 
@@ -343,7 +353,7 @@ test('keeps credentials out of JavaScript-visible and durable storage', async ({
   const accessJwt = await signInAndReadAccessJwt(page)
 
   // The refresh credential lives for the browser profile alone.
-  const refreshToken = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  const refreshToken = await refreshTokenOf(context)
 
   const peer = await openAuthenticatedPeerTab(context)
 
@@ -403,10 +413,9 @@ test('terminal authentication loss after access-JWT expiry converges every same-
   // Revoke the refresh credential server-side, as a login from elsewhere
   // would. Both tabs still hold valid in-memory access JWTs, so only a
   // demand-driven refresh refusal can end the session.
-  const token = (await context.cookies()).find(c => c.name === 'refresh_token')
-  expect(token).toBeDefined()
+  const token = await refreshTokenOf(context)
   const revoke = await page.request.post(`${BASE_URL}/logout`, {
-    headers: { cookie: `refresh_token=${token!.value}` },
+    headers: { cookie: `refresh_token=${token}` },
   })
   expect(revoke.status()).toBe(204)
 
@@ -531,11 +540,11 @@ test('restoring a third tab while a living peer holds a near-expiry access JWT i
   await waitUntilAccessJwtInsideSafetyWindow(page, accessJwt)
 
   const refreshCount = trackAuthPosts(context, '/refresh')
-  const tokenBefore = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  const tokenBefore = await refreshTokenOf(context)
   await openAuthenticatedPeerTab(context)
 
   expect(refreshCount()).toBe(1)
-  const tokenAfter = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  const tokenAfter = await refreshTokenOf(context)
   expect(tokenAfter).not.toBe(tokenBefore)
   await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
   await expect(peer.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
@@ -549,13 +558,13 @@ test('a reload in a two-tab session restores from the live peer access JWT witho
   const peer = await openAuthenticatedPeerTab(context)
 
   const refreshCount = trackAuthPosts(context, '/refresh')
-  const tokenBefore = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  const tokenBefore = await refreshTokenOf(context)
   await page.reload()
 
   await expect(page.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
   await expect(page.getByRole('heading', { name: LOGIN_HEADING })).not.toBeVisible()
   await expect(peer.getByRole('heading', { name: ACTIVE_HEADING })).toBeVisible()
   expect(refreshCount()).toBe(0)
-  const tokenAfter = (await context.cookies()).find(c => c.name === 'refresh_token')!.value
+  const tokenAfter = await refreshTokenOf(context)
   expect(tokenAfter).toBe(tokenBefore)
 })

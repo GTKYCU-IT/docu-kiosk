@@ -345,13 +345,19 @@ export class AdminSessionController {
     this.closed = true;
     ++this.operation;
     this.clearProtectedState();
+    this.cancelPeerWaiters();
+    this.channel?.removeEventListener("message", this.receiveMessage);
+    this.channel?.close();
+  }
+
+  // Resolve and drop every pending peer waiter so a late targeted token
+  // response cannot resurrect the terminated session.
+  private cancelPeerWaiters(): void {
     for (const waiter of this.peerWaiters.values()) {
       clearTimeout(waiter.timer);
       waiter.resolve(null);
     }
     this.peerWaiters.clear();
-    this.channel?.removeEventListener("message", this.receiveMessage);
-    this.channel?.close();
   }
 
   private async refreshWithCoordination(
@@ -642,13 +648,7 @@ export class AdminSessionController {
   // Broadcasting is the caller's choice so peer-derived messages stay local.
   private localTerminalTransition(): void {
     ++this.operation;
-    // Resolve and drop every pending peer waiter before changing state so a
-    // late targeted token response cannot resurrect the terminated session.
-    for (const waiter of this.peerWaiters.values()) {
-      clearTimeout(waiter.timer);
-      waiter.resolve(null);
-    }
-    this.peerWaiters.clear();
+    this.cancelPeerWaiters();
     this.clearProtectedState();
     this.update({ status: "login", submitting: false });
   }
