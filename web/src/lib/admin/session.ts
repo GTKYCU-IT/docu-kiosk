@@ -528,22 +528,6 @@ export class AdminSessionController {
     if (typeof value !== "object" || value === null) return null;
     const message = value as Record<string, unknown>;
     if (typeof message.tabId !== "string") return null;
-    // Only request/response protocol variants are correlated by requestId;
-    // terminal/logout broadcasts are fire-and-forget.
-    const requestIdRequired =
-      message.type === "token-request" ||
-      message.type === "token" ||
-      message.type === "epoch";
-    if (requestIdRequired && typeof message.requestId !== "string") return null;
-
-    if (message.type === "token-request") {
-      if (typeof message.requestId !== "string") return null;
-      return {
-        type: "token-request",
-        tabId: message.tabId,
-        requestId: message.requestId,
-      };
-    }
     if (message.type === "terminal" || message.type === "logout") {
       const epoch = message.epoch;
       if (epoch === null || typeof epoch === "string") {
@@ -555,9 +539,20 @@ export class AdminSessionController {
       }
       return null;
     }
+
+    // Only request/response protocol variants are correlated by requestId;
+    // terminal/logout broadcasts are fire-and-forget.
+    if (typeof message.requestId !== "string") return null;
+
+    if (message.type === "token-request") {
+      return {
+        type: "token-request",
+        tabId: message.tabId,
+        requestId: message.requestId,
+      };
+    }
     if (
       message.type === "epoch" &&
-      typeof message.requestId === "string" &&
       typeof message.targetTabId === "string" &&
       typeof message.epoch === "string"
     ) {
@@ -571,7 +566,6 @@ export class AdminSessionController {
     }
     if (
       message.type === "token" &&
-      typeof message.requestId === "string" &&
       typeof message.jwt === "string" &&
       (message.targetTabId === null || typeof message.targetTabId === "string")
     ) {

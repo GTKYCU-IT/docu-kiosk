@@ -9,6 +9,18 @@ import {
 } from "./session";
 import { response, testJwt } from "./test-response";
 
+function messageOfType<T extends AdminSessionMessage["type"]>(
+  type: T,
+): (message: AdminSessionMessage) => message is Extract<
+  AdminSessionMessage,
+  { type: T }
+> {
+  return (
+    message: AdminSessionMessage,
+  ): message is Extract<AdminSessionMessage, { type: T }> =>
+    message.type === type;
+}
+
 const NOW = 2_000_000_000_000;
 
 class TestChannelBus {
@@ -245,10 +257,7 @@ describe("AdminSessionController protected requests", () => {
 
     // The coordinated refresh keeps the successor in the same browser-session
     // epoch: the restore and refresh broadcasts must carry identical epochs.
-    const tokenBroadcasts = posted.filter(
-      (message): message is Extract<AdminSessionMessage, { type: "token" }> =>
-        message.type === "token",
-    );
+    const tokenBroadcasts = posted.filter(messageOfType("token"));
     expect(tokenBroadcasts).toHaveLength(2);
     const [restoreBroadcast, refreshBroadcast] = tokenBroadcasts;
     expect(restoreBroadcast.jwt).toBe(firstToken);
@@ -390,10 +399,7 @@ describe("AdminSessionController cross-tab lifecycle", () => {
 
     // The owner's restore broadcast pins the current browser-session epoch;
     // a refresh successor must carry the same epoch, not a later login's.
-    const ownerTokenBroadcast = posted.find(
-      (message): message is Extract<AdminSessionMessage, { type: "token" }> =>
-        message.type === "token",
-    );
+    const ownerTokenBroadcast = posted.find(messageOfType("token"));
     expect(ownerTokenBroadcast?.type).toBe("token");
     const sessionEpoch = ownerTokenBroadcast!.epoch;
 
@@ -651,10 +657,7 @@ describe("AdminSessionController browser-session epoch", () => {
 
     // The peer's own restore broadcast pins the shared browser-session epoch.
     const peerEpoch =
-      peerPosted.find(
-        (message): message is Extract<AdminSessionMessage, { type: "token" }> =>
-          message.type === "token",
-      )?.epoch ?? null;
+      peerPosted.find(messageOfType("token"))?.epoch ?? null;
     expect(peerEpoch).not.toBeNull();
 
     // Age the shared JWT inside the five-second freshness cutoff so the
@@ -678,10 +681,7 @@ describe("AdminSessionController browser-session epoch", () => {
 
     // The peer's responses carry only the epoch, never a jwt field, and the
     // stale JWT is never served to the reloaded tab.
-    const epochResponses = peerPosted.filter(
-      (message): message is Extract<AdminSessionMessage, { type: "epoch" }> =>
-        message.type === "epoch",
-    );
+    const epochResponses = peerPosted.filter(messageOfType("epoch"));
     expect(epochResponses.length).toBeGreaterThan(0);
     for (const epochResponse of epochResponses) {
       expect(epochResponse.epoch).toBe(peerEpoch);
@@ -706,10 +706,7 @@ describe("AdminSessionController browser-session epoch", () => {
 
     // The terminal broadcast carries the learned epoch, so the still-open
     // peer in that same epoch terminates instead of ignoring it.
-    const terminalBroadcast = reloaderPosted.find(
-      (message): message is Extract<AdminSessionMessage, { type: "terminal" }> =>
-        message.type === "terminal",
-    );
+    const terminalBroadcast = reloaderPosted.find(messageOfType("terminal"));
     expect(terminalBroadcast?.epoch).toBe(peerEpoch);
     expect(peer.getState()).toEqual({ status: "login", submitting: false });
     expect(peer.getAccessToken()).toBeNull();
@@ -868,8 +865,9 @@ describe("AdminSessionController protocol requestId scoping", () => {
     });
     expect(
       posted.some(
-        (message): message is Extract<AdminSessionMessage, { type: "token" }> =>
-          message.type === "token" && message.requestId === "intruder-request",
+        (message) =>
+          messageOfType("token")(message) &&
+          message.requestId === "intruder-request",
       ),
     ).toBe(true);
 
@@ -967,12 +965,9 @@ describe("AdminSessionController protocol requestId scoping", () => {
       ).toBe(true);
     });
     const secondRequestId =
-      reloaderPosted.find(
-        (
-          m,
-        ): m is Extract<AdminSessionMessage, { type: "token-request" }> =>
-          m.type === "token-request" && m.requestId !== requestId,
-      )?.requestId ?? "missing";
+      reloaderPosted
+        .filter(messageOfType("token-request"))
+        .find((m) => m.requestId !== requestId)?.requestId ?? "missing";
     reloaderBus.open().postMessage({
       type: "epoch",
       tabId: "peer",
