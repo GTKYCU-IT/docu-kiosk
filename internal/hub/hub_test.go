@@ -35,12 +35,9 @@ func textFrame(s string) frame {
 // otherwise blocks on readCh, returning an error once it is closed, but also
 // returns ctx.Err() when ctx is done — mirroring real conn semantics.
 type fakeConn struct {
-	mu         sync.Mutex
-	writes     [][]byte
-	readFrames []frame
-	// readCount counts the frames Read has consumed: a session that consumed
-	// its initial status frame has completed the handshake read and entered
-	// the publication path.
+	mu             sync.Mutex
+	writes         [][]byte
+	readFrames     []frame
 	readCount      int
 	readSignal     chan struct{} // closed (and replaced) when a frame is queued
 	writeErr       error
@@ -336,9 +333,6 @@ func assertDone(t *testing.T, what string, done <-chan struct{}) {
 	}
 }
 
-// startSession runs runSession in a goroutine with a ready handshake frame
-// queued on the conn, returning a done channel closed when the session exits
-// and a cleanup that releases the session's read and waits for it to finish.
 func startSession(t *testing.T, h *Hub, k kiosks.Kiosk, c *fakeConn) chan struct{} {
 	t.Helper()
 	return startSessionFrames(t, h, k, c, textFrame(`{"type":"status","status":"ready"}`))
@@ -512,9 +506,7 @@ func TestRunSessionPingFailureClosesSession(t *testing.T) {
 	fc.pingErr = errors.New("ping timeout")
 	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, fc)
 
-	// The session may register and tear down (5ms ping interval) before the
-	// first poll, so assert on the recorded greeting write instead: it is
-	// written after registration and persists after teardown.
+	// Ping failure can remove the session before the first status poll.
 	waitFor(t, func() bool { return len(fc.recordedWrites()) >= 1 })
 	waitFor(t, func() bool { return len(h.Statuses()) == 0 })
 }
@@ -523,15 +515,13 @@ func TestRunSessionGreetingWriteFailureTearsDown(t *testing.T) {
 	h, buf := newTestHub(nil)
 	id := uuid.New()
 	fc := newFakeConn()
-	// The greeting write fails before the session ever serves a message.
 	fc.setWriteErr(errors.New("socket closed"))
 	done := startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, fc)
 
-	// The session registers, the greeting write fails, and teardown removes
-	// it. The done channel closes only after CloseNow and the conditional
-	// teardown both completed.
-	waitFor(t, func() bool { return len(h.Statuses()) == 0 })
 	assertDone(t, "session teardown", done)
+	if got := h.Statuses(); len(got) != 0 {
+		t.Fatalf("greeting write failure published session: %v", got)
+	}
 
 	logged := buf.String()
 	if !strings.Contains(logged, "write greeting") {
@@ -551,13 +541,12 @@ func TestRunSessionReconnectReplacesSession(t *testing.T) {
 	waitFor(t, func() bool { return published(h, id) })
 
 	connB := newFakeConn()
-	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB)
+	startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
+		textFrame(`{"type":"status","status":"signing"}`))
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusSigning })
 
-	// B's greeting proves B registered and replaced A in the sessions map.
-	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
-
-	if got := h.Statuses(); len(got) != 1 || got[id] != StatusReady {
-		t.Fatalf("expected exactly session %v ready, got %v", id, got)
+	if got := h.Statuses(); len(got) != 1 || got[id] != StatusSigning {
+		t.Fatalf("expected exactly session %v signing, got %v", id, got)
 	}
 
 	// Stale-teardown ordering: A's session ends only after B has replaced it.
@@ -567,8 +556,8 @@ func TestRunSessionReconnectReplacesSession(t *testing.T) {
 	connA.closeRead()
 	assertDone(t, "stale session teardown", doneA)
 
-	if got := h.Statuses(); len(got) != 1 || got[id] != StatusReady {
-		t.Fatalf("stale teardown removed live session: expected exactly %v ready, got %v", id, got)
+	if got := h.Statuses(); len(got) != 1 || got[id] != StatusSigning {
+		t.Fatalf("stale teardown removed live session: expected exactly %v signing, got %v", id, got)
 	}
 
 	// The live session B must still accept writes.
@@ -1214,15 +1203,15 @@ func TestPushSignAfterReplacementWritesToCurrentGeneration(t *testing.T) {
 	h, _ := newTestHub(nil)
 	id := uuid.New()
 
-	// connA is replaced by connB; B's greeting proves B published.
 	connA := newFakeConn()
 	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connA)
 	waitFor(t, func() bool {
 		return published(h, id) && len(connA.recordedWrites()) >= 1
 	})
 	connB := newFakeConn()
-	startSession(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB)
-	waitFor(t, func() bool { return len(connB.recordedWrites()) >= 1 })
+	startSessionFrames(t, h, kiosks.Kiosk{ID: id, Name: "lobby", IP: "10.0.0.5"}, connB,
+		textFrame(`{"type":"status","status":"signing"}`))
+	waitFor(t, func() bool { return h.Statuses()[id] == StatusSigning })
 
 	// Arm connA's write gate so any (forbidden) post-replacement delivery to
 	// the old session would block and be observable as an in-flight write.

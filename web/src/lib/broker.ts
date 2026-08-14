@@ -4,7 +4,7 @@ export type BrokerStatus =
   | "connecting" // socket opening/opened; greeting not yet received
   | "unregistered" // socket closed before any greeting
   | "ready" // greeting received
-  | "reconnecting" // authenticated socket lost; retrying
+  | "reconnecting" // greeted socket lost; retrying
   | "signing"; // sign message received
 
 export interface BrokerState {
@@ -71,7 +71,7 @@ export class BrokerConnection {
   private status: BrokerStatus = "connecting";
   private kioskName: string | undefined;
   private signingUrl: string | undefined;
-  private authenticated = false;
+  private currentSocketGreeted = false;
   private preGreetingRetries = 0;
   private closed = false;
   private reconnectTimer: ReconnectTimer | null = null;
@@ -140,44 +140,36 @@ export class BrokerConnection {
     }
   }
 
-  // Report the kiosk's current status to the broker. Status frames are only
-  // valid on the current generation after its greeting: nothing is sent
-  // before the greeting, from a replaced/disconnected socket, or after
-  // close(). All call sites run under the current-socket guard, so a stale
-  // generation can never emit a frame.
-  private sendStatus(status: KioskStatus): void {
-    if (this.closed || !this.authenticated || this.socket === null) return;
+  private reportStatus(status: KioskStatus): void {
+    if (this.closed || !this.currentSocketGreeted || this.socket === null) return;
     this.socket.send(encodeStatus(status));
   }
 
   private handleConnected(name: string): void {
-    this.authenticated = true;
+    this.currentSocketGreeted = true;
     this.preGreetingRetries = 0;
     if (this.status === "signing") {
-      // Reconnect during an active signing session: the iframe must stay
-      // mounted, so refresh only the stored name and keep "signing". The
-      // broker gates session publication on the initial status frame, so
-      // the replacement generation must first report that it is signing.
+      // Keep the iframe mounted through reconnect.
       this.kioskName = name;
-      this.sendStatus("signing");
+      this.reportStatus("signing");
       return;
     }
     this.status = "ready";
     this.kioskName = name;
     this.signingUrl = undefined;
-    this.sendStatus("ready");
+    this.reportStatus("ready");
     this.onChange({ status: "ready", kioskName: name });
   }
 
   private handleSign(url: string): void {
     this.status = "signing";
     this.signingUrl = url;
-    this.sendStatus("signing");
+    this.reportStatus("signing");
     this.onChange({ status: "signing", kioskName: this.kioskName, signingUrl: url });
   }
 
   private handleClose(): void {
-    this.authenticated = false;
+    this.currentSocketGreeted = false;
     if (this.status === "signing") {
       // Keep "signing" so the iframe stays mounted; reconnect in the
       // background without notifying the view.
@@ -214,7 +206,7 @@ export class BrokerConnection {
       if (this.closed) return;
       const socket = this.createSocket(this.url);
       this.socket = socket;
-      this.authenticated = false;
+      this.currentSocketGreeted = false;
       this.wire(socket);
     }, this.reconnectDelayMs);
     this.reconnectTimer = { clear: () => globalThis.clearTimeout(handle) };
@@ -225,9 +217,9 @@ export class BrokerConnection {
     if (this.closed) return;
     if (this.status !== "signing") return;
     this.signingUrl = undefined;
-    if (this.authenticated) {
+    if (this.currentSocketGreeted) {
       this.status = "ready";
-      this.sendStatus("ready");
+      this.reportStatus("ready");
       this.onChange({ status: "ready", kioskName: this.kioskName });
     } else {
       // The socket is down or the replacement has not been greeted yet; a
@@ -265,7 +257,7 @@ export class BrokerConnection {
     const stale = this.socket;
     this.socket = null;
     stale?.close();
-    this.authenticated = false;
+    this.currentSocketGreeted = false;
     this.preGreetingRetries = 0;
     this.kioskName = undefined;
     this.signingUrl = undefined;

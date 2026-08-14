@@ -129,10 +129,7 @@ func registerKiosk(t *testing.T, ts *httptest.Server, name string) {
 	}
 }
 
-// dialWS dials the WebSocket endpoint with the given options and reads the
-// initial "connected" greeting, without sending any client frame: the
-// session stays uninitialized until a status frame is written.
-func dialWS(t *testing.T, ts *httptest.Server, opts *websocket.DialOptions) (*websocket.Conn, string) {
+func dialUninitializedWS(t *testing.T, ts *httptest.Server, opts *websocket.DialOptions) (*websocket.Conn, string) {
 	t.Helper()
 	conn, _, err := websocket.Dial(context.Background(), wsURL(ts), opts)
 	if err != nil {
@@ -159,14 +156,17 @@ func dialWS(t *testing.T, ts *httptest.Server, opts *websocket.DialOptions) (*we
 	return conn, msg.Name
 }
 
-// writeStatus sends a status frame, completing the broker handshake. The
-// broker publishes the session only after this frame.
-func writeStatus(t *testing.T, conn *websocket.Conn, status string) {
+func completeStatusHandshake(t *testing.T, conn *websocket.Conn, status string) {
 	t.Helper()
 	if err := conn.Write(context.Background(), websocket.MessageText,
 		[]byte(fmt.Sprintf(`{"type":"status","status":%q}`, status))); err != nil {
 		t.Fatalf("write status frame: %v", err)
 	}
+}
+
+func waitForPublishedSessions(t *testing.T, s *server, count int) {
+	t.Helper()
+	waitFor(t, func() bool { return len(s.hub.Statuses()) == count })
 }
 
 // connectWS dials the WebSocket endpoint and completes the handshake: reads
@@ -180,8 +180,8 @@ func connectWS(t *testing.T, ts *httptest.Server) (*websocket.Conn, string) {
 // connectWSStatus is connectWS with a caller-chosen handshake status.
 func connectWSStatus(t *testing.T, ts *httptest.Server, status string) (*websocket.Conn, string) {
 	t.Helper()
-	conn, name := dialWS(t, ts, nil)
-	writeStatus(t, conn, status)
+	conn, name := dialUninitializedWS(t, ts, nil)
+	completeStatusHandshake(t, conn, status)
 	return conn, name
 }
 
@@ -190,10 +190,10 @@ func connectWSStatus(t *testing.T, ts *httptest.Server, status string) (*websock
 // with the given status.
 func connectWSStatusFrom(t *testing.T, ts *httptest.Server, ip, status string) (*websocket.Conn, string) {
 	t.Helper()
-	conn, name := dialWS(t, ts, &websocket.DialOptions{
+	conn, name := dialUninitializedWS(t, ts, &websocket.DialOptions{
 		HTTPHeader: http.Header{"X-Forwarded-For": []string{ip}},
 	})
-	writeStatus(t, conn, status)
+	completeStatusHandshake(t, conn, status)
 	return conn, name
 }
 
@@ -399,13 +399,12 @@ func TestRegisterAlreadyRegisteredSameName(t *testing.T) {
 	assertProblem(t, p, problemAlreadyRegistered, http.StatusConflict)
 
 	// The retry created no second identity and changed nothing: the greeting
-	// still names the single original kiosk. The session is published only
-	// after the broker consumes the status frame completing the handshake.
+	// still names the single original kiosk.
 	_, name := connectWS(t, ts)
 	if name != "Lobby" {
 		t.Errorf("expected greeting name Lobby, got %s", name)
 	}
-	waitFor(t, func() bool { return len(s.hub.Statuses()) == 1 })
+	waitForPublishedSessions(t, s, 1)
 	if kiosks := listKiosks(t, ts); len(kiosks) != 1 || kiosks[0].Name != "Lobby" {
 		t.Errorf("expected exactly one kiosk named Lobby, got %+v", kiosks)
 	}
@@ -423,9 +422,7 @@ func TestRegisterSameIPCannotRename(t *testing.T) {
 	if name != "A" {
 		t.Errorf("expected greeting name A, got %s", name)
 	}
-	// The session is published only after the broker consumes the status
-	// frame completing the handshake.
-	waitFor(t, func() bool { return len(s.hub.Statuses()) == 1 })
+	waitForPublishedSessions(t, s, 1)
 	before := listKiosks(t, ts)
 	if len(before) != 1 || before[0].Name != "A" {
 		t.Fatalf("expected one kiosk named A, got %+v", before)
@@ -648,9 +645,7 @@ func TestListKiosksShowsConnected(t *testing.T) {
 	registerKiosk(t, ts, "lobby")
 	connectWS(t, ts)
 
-	// The session is published only after the broker consumes the status
-	// frame completing the handshake.
-	waitFor(t, func() bool { return len(s.hub.Statuses()) == 1 })
+	waitForPublishedSessions(t, s, 1)
 
 	res, err := http.Get(ts.URL + "/api/kiosks")
 	if err != nil {
@@ -676,9 +671,6 @@ func TestListKiosksShowsConnected(t *testing.T) {
 	}
 }
 
-// TestListKiosksShowsReadyAndSigningExcludesUninitialized pins the live-list
-// contract: ready and signing kiosks are listed as {id,name}, while a
-// connected kiosk that has not completed the status handshake is not.
 func TestListKiosksShowsReadyAndSigningExcludesUninitialized(t *testing.T) {
 	s, ts := setupTrustedProxyServer(t)
 	registerFromIP(t, ts, "10.0.0.2", "ready-kiosk")
@@ -687,14 +679,11 @@ func TestListKiosksShowsReadyAndSigningExcludesUninitialized(t *testing.T) {
 
 	connectWSStatusFrom(t, ts, "10.0.0.2", "ready")
 	connectWSStatusFrom(t, ts, "10.0.0.3", "signing")
-	// The third kiosk dials and greets but never sends its status frame.
-	dialWS(t, ts, &websocket.DialOptions{
+	dialUninitializedWS(t, ts, &websocket.DialOptions{
 		HTTPHeader: http.Header{"X-Forwarded-For": []string{"10.0.0.4"}},
 	})
 
-	// Both handshaken sessions are published with their statuses; the
-	// uninitialized session never publishes.
-	waitFor(t, func() bool { return len(s.hub.Statuses()) == 2 })
+	waitForPublishedSessions(t, s, 2)
 
 	list := listKiosks(t, ts)
 	if len(list) != 2 {
@@ -709,23 +698,20 @@ func TestListKiosksShowsReadyAndSigningExcludesUninitialized(t *testing.T) {
 		}
 	}
 
-	// The hub snapshot agrees: ready and signing, nothing uninitialized.
-	st := s.hub.Statuses()
-	if len(st) != 2 || st[list[0].ID] != hub.StatusReady || st[list[1].ID] != hub.StatusSigning {
-		t.Fatalf("expected ready and signing statuses for %v and %v, got %v", list[0], list[1], st)
+	statusByKioskID := s.hub.Statuses()
+	if len(statusByKioskID) != 2 ||
+		statusByKioskID[list[0].ID] != hub.StatusReady ||
+		statusByKioskID[list[1].ID] != hub.StatusSigning {
+		t.Fatalf("expected ready and signing statuses for %v and %v, got %v", list[0], list[1], statusByKioskID)
 	}
 }
 
-// TestPushToSigningKioskSucceeds pins unchanged Push behavior for a signing
-// kiosk: the status never blocks sign-message delivery.
 func TestPushToSigningKioskSucceeds(t *testing.T) {
 	s, ts := setupTestServer(t)
 	registerKiosk(t, ts, "lobby")
 	conn, _ := connectWSStatus(t, ts, "signing")
 
-	// The session is published only after the broker consumes the status
-	// frame completing the handshake.
-	waitFor(t, func() bool { return len(s.hub.Statuses()) == 1 })
+	waitForPublishedSessions(t, s, 1)
 
 	list := listKiosks(t, ts)
 	if len(list) != 1 {
@@ -787,9 +773,7 @@ func TestWSConnectsWhenRegistered(t *testing.T) {
 	registerKiosk(t, ts, "lobby")
 	connectWS(t, ts)
 
-	// The session is published only after the broker consumes the status
-	// frame completing the handshake.
-	waitFor(t, func() bool { return len(s.hub.Statuses()) == 1 })
+	waitForPublishedSessions(t, s, 1)
 }
 
 func TestWSDisconnectRemovesFromHub(t *testing.T) {
@@ -821,9 +805,7 @@ func TestPushSuccess(t *testing.T) {
 	registerKiosk(t, ts, "lobby")
 	conn, _ := connectWS(t, ts)
 
-	// The session is published only after the broker consumes the status
-	// frame completing the handshake.
-	waitFor(t, func() bool { return len(s.hub.Statuses()) == 1 })
+	waitForPublishedSessions(t, s, 1)
 
 	res, err := http.Get(ts.URL + "/api/kiosks")
 	if err != nil {
@@ -931,9 +913,7 @@ func TestRegisterThenConnect(t *testing.T) {
 		t.Errorf("expected name lobby from connected message, got %q", name)
 	}
 
-	// The session is published only after the broker consumes the status
-	// frame completing the handshake.
-	waitFor(t, func() bool { return len(s.hub.Statuses()) == 1 })
+	waitForPublishedSessions(t, s, 1)
 }
 
 // stubHub is a kioskHub fake for handler tests.
@@ -950,7 +930,7 @@ func (sh *stubHub) PushSign(ctx context.Context, id uuid.UUID, url string) error
 	return sh.sendErr
 }
 
-func (sh *stubHub) Statuses() map[uuid.UUID]hub.Status {
+func (sh *stubHub) Statuses() hub.StatusSnapshot {
 	return nil
 }
 

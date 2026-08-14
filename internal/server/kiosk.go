@@ -92,17 +92,7 @@ func (s *server) handleListKiosks(w http.ResponseWriter, r *http.Request) {
 		Name string    `json:"name"`
 	}
 
-	// The status snapshot is the live-set source: it holds exactly the
-	// handshaken sessions (Ready or Signing), so uninitialized sessions and
-	// Offline kiosks stay out of the list. Its keys feed the existing
-	// ListLive input unchanged.
-	statuses := s.hub.Statuses()
-	live := make([]uuid.UUID, 0, len(statuses))
-	for id := range statuses {
-		live = append(live, id)
-	}
-
-	ks, err := s.kiosks.ListLive(r.Context(), live)
+	ks, err := s.kiosks.ListLive(r.Context(), s.hub.Statuses().LiveKioskIDs())
 	if err != nil {
 		s.respondWithError(w, "failed to list kiosks", http.StatusInternalServerError, err)
 		return
