@@ -2,7 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import Admin from "./Admin.svelte";
-import { response } from "$lib/admin/test-response";
+import { AdminSessionController } from "$lib/admin/session";
+import { response, testJwt } from "$lib/admin/test-response";
 
 let fetchMock: Mock;
 
@@ -67,13 +68,15 @@ describe("Admin restoration", () => {
     );
     expect(screen.queryByText("Broker unavailable")).toBeNull();
 
-    resolveRetry(response(200, { jwt: "restored-access-token" }));
+    const restoredJwt = testJwt();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    resolveRetry(response(200, { jwt: restoredJwt }));
     expect(
       await screen.findByRole("heading", {
         name: "Administrator session active",
       }),
     ).toBeTruthy();
-    expect(document.body.textContent).not.toContain("restored-access-token");
+    expect(document.body.textContent).not.toContain(restoredJwt);
   });
 });
 
@@ -108,9 +111,10 @@ describe("Admin login", () => {
   });
 
   it("replaces the form in place after successful login without rendering the JWT", async () => {
+    const loginJwt = testJwt();
     fetchMock
       .mockResolvedValueOnce(response(401))
-      .mockResolvedValueOnce(response(200, { jwt: "login-access-token" }));
+      .mockResolvedValueOnce(response(200, { jwt: loginJwt }));
     render(Admin);
     await screen.findByRole("heading", { name: "Administrator sign in" });
 
@@ -130,7 +134,7 @@ describe("Admin login", () => {
       }),
     ).toBeTruthy();
     expect(screen.queryByLabelText("Password")).toBeNull();
-    expect(document.body.textContent).not.toContain("login-access-token");
+    expect(document.body.textContent).not.toContain(loginJwt);
     expect(document.body.textContent).not.toContain("secret phrase");
   });
 });
@@ -139,7 +143,7 @@ describe("Admin logout", () => {
   it("keeps the authenticated surface visible and disables sign out while it is in flight", async () => {
     let resolveLogout!: (value: Response) => void;
     fetchMock
-      .mockResolvedValueOnce(response(200, { jwt: "active-token" }))
+      .mockResolvedValueOnce(response(200, { jwt: testJwt() }))
       .mockImplementationOnce(
         () =>
           new Promise<Response>((resolve) => {
@@ -176,7 +180,7 @@ describe("Admin logout", () => {
     ["a network failure", () => Promise.reject(new Error("offline"))],
   ])("keeps the authenticated view and reports failure after %s", async (_name, outcome) => {
     fetchMock
-      .mockResolvedValueOnce(response(200, { jwt: "active-token" }))
+      .mockResolvedValueOnce(response(200, { jwt: testJwt() }))
       .mockImplementationOnce(outcome);
     render(Admin);
     await screen.findByRole("heading", {
@@ -200,7 +204,7 @@ describe("Admin logout", () => {
 
   it("clears the authenticated view in place only after logout returns 204", async () => {
     fetchMock
-      .mockResolvedValueOnce(response(200, { jwt: "active-token" }))
+      .mockResolvedValueOnce(response(200, { jwt: testJwt() }))
       .mockResolvedValueOnce(response(204));
     render(Admin);
     await screen.findByRole("heading", {
@@ -221,7 +225,7 @@ describe("Admin logout", () => {
 
   it("returns to clean sign in when logout reports terminal authentication loss", async () => {
     fetchMock
-      .mockResolvedValueOnce(response(200, { jwt: "active-token" }))
+      .mockResolvedValueOnce(response(200, { jwt: testJwt() }))
       .mockResolvedValueOnce(response(401));
     render(Admin);
     await screen.findByRole("heading", {
@@ -240,5 +244,21 @@ describe("Admin logout", () => {
       ),
     ).toBeNull();
     expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
+  });
+});
+
+describe("Admin teardown", () => {
+  it("closes the session controller when the page unmounts", async () => {
+    const close = vi.spyOn(AdminSessionController.prototype, "close");
+
+    fetchMock.mockResolvedValue(response(200, { jwt: testJwt() }));
+    const { unmount } = render(Admin);
+    await screen.findByRole("heading", {
+      name: "Administrator session active",
+    });
+
+    unmount();
+
+    expect(close).toHaveBeenCalled();
   });
 });

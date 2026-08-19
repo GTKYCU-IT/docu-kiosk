@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import * as Card from "$lib/components/ui/card";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
@@ -29,6 +29,8 @@
   onMount(() => {
     void session.restore();
   });
+
+  onDestroy(() => session.close());
 
   async function submitLogin(event: SubmitEvent) {
     event.preventDefault();
@@ -64,7 +66,7 @@
           <h1 class="text-2xl font-semibold tracking-tight">Administrator sign in</h1>
         </Card.Title>
         <Card.Description>
-          Enter your Broker administrator credentials for this tab.
+          Enter your Broker administrator credentials for this browser profile.
         </Card.Description>
       </Card.Header>
       <Card.Content>
@@ -119,7 +121,8 @@
           </h1>
         </Card.Title>
         <Card.Description>
-          This administrator session is available only in this tab.
+          This administrator session is shared across tabs of this browser
+          profile.
         </Card.Description>
       </Card.Header>
       {#if sessionState.status === "logout-failed"}
